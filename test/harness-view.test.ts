@@ -261,6 +261,42 @@ describe("HarnessView", () => {
     expect(frame).not.toContain("/reasoning Choose the reasoning effort")
   })
 
+  test("fetches usage and renders context-window details", async () => {
+    testRenderer = await createTestRenderer({ width: 110, height: 36 })
+    const { renderer, renderOnce, captureCharFrame } = testRenderer
+    let usageRequests = 0
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onUsage: () => {
+        usageRequests += 1
+      },
+    })
+    view.handleEvent({
+      _tag: "TokenUsage",
+      totalTokens: 5000,
+      lastTokens: 1200,
+      contextWindow: 128000,
+    })
+    view.input.value = "/usage"
+    view.input.submit()
+    view.showUsage({
+      rateLimits: {
+        limitId: "codex",
+        limitName: "Codex",
+        primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: null },
+        secondary: null,
+        planType: "plus",
+      },
+      rateLimitsByLimitId: null,
+    })
+    await renderOnce()
+
+    expect(usageRequests).toBe(1)
+    expect(captureCharFrame()).toContain("Latest turn: 1,200 tokens")
+    expect(captureCharFrame()).toContain("Capacity: 128,000 tokens")
+    expect(captureCharFrame()).toContain("12% used")
+  })
+
   test("completes slash commands with tab and the arrow keys", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 30 })
     const { renderer } = testRenderer

@@ -41,6 +41,25 @@ export interface CodexModel {
   readonly isDefault: boolean
 }
 
+export interface CodexRateLimitWindow {
+  readonly usedPercent: number
+  readonly windowDurationMins: number | null
+  readonly resetsAt: number | null
+}
+
+export interface CodexRateLimitSnapshot {
+  readonly limitId: string | null
+  readonly limitName: string | null
+  readonly primary: CodexRateLimitWindow | null
+  readonly secondary: CodexRateLimitWindow | null
+  readonly planType: string | null
+}
+
+export interface CodexRateLimits {
+  readonly rateLimits: CodexRateLimitSnapshot
+  readonly rateLimitsByLimitId: Readonly<Record<string, CodexRateLimitSnapshot>> | null
+}
+
 export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel"
 
 export type CodexEvent =
@@ -58,6 +77,7 @@ export type CodexEvent =
   | {
       readonly _tag: "TokenUsage"
       readonly totalTokens: number
+      readonly lastTokens: number
       readonly contextWindow: number | null
     }
   | {

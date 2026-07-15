@@ -40,6 +40,28 @@ describe("Codex app-server events", () => {
     expect(event).toEqual({ _tag: "Activity", label: "Running bun test" })
   })
 
+  test("decodes token usage with context-window details", async () => {
+    const event = await Effect.runPromise(
+      parseCodexNotification({
+        method: "thread/tokenUsage/updated",
+        params: {
+          tokenUsage: {
+            total: { totalTokens: 5000 },
+            last: { totalTokens: 1200 },
+            modelContextWindow: 128000,
+          },
+        },
+      }),
+    )
+
+    expect(event).toEqual({
+      _tag: "TokenUsage",
+      totalTokens: 5000,
+      lastTokens: 1200,
+      contextWindow: 128000,
+    })
+  })
+
   test("retains unknown notifications losslessly", async () => {
     const params = { future: true }
     const event = await Effect.runPromise(

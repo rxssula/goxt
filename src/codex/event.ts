@@ -29,6 +29,7 @@ const PlanUpdated = Schema.Struct({
 const TokenUsage = Schema.Struct({
   tokenUsage: Schema.Struct({
     total: Schema.Struct({ totalTokens: Schema.Number }),
+    last: Schema.Struct({ totalTokens: Schema.Number }),
     modelContextWindow: Schema.NullOr(Schema.Number),
   }),
 })
@@ -155,6 +156,7 @@ export const parseCodexNotification = Effect.fn("CodexAppServer.parseNotificatio
         return {
           _tag: "TokenUsage",
           totalTokens: value.tokenUsage.total.totalTokens,
+          lastTokens: value.tokenUsage.last.totalTokens,
           contextWindow: value.tokenUsage.modelContextWindow,
         } satisfies CodexEvent
       }

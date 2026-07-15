@@ -25,6 +25,8 @@ supported reasoning levels. Move with the arrow keys, press Enter to select, or
 Esc to cancel. Both settings apply to the next turn and remain active for later
 turns. The direct `/model <id>` and `/reasoning <level>` forms also work;
 `/help` shows the command summary.
+Use `/usage` to fetch the current account rate limits and see the latest context
+window details reported by Codex.
 Use `/clear` between turns to clear the transcript and start a new Codex thread;
 the selected model and reasoning level remain unchanged. These settings are also
 restored between launches from `~/.config/goxt/settings.json` (or

@@ -10,6 +10,7 @@ import {
   type ApprovalDecision,
   type CodexEvent,
   type CodexModel,
+  type CodexRateLimits,
   type CodexRunError,
   type CodexRunRequest,
   type CodexStatus,
@@ -19,6 +20,7 @@ import {
 export interface Interface {
   readonly status: () => Effect.Effect<CodexStatus>
   readonly listModels: () => Effect.Effect<ReadonlyArray<CodexModel>, CodexRunError>
+  readonly readRateLimits: () => Effect.Effect<CodexRateLimits, CodexRunError>
   readonly run: (
     request: CodexRunRequest,
     onEvent: (event: CodexEvent) => void,
@@ -65,6 +67,24 @@ const ModelListResponse = Schema.Struct({
     }),
   ),
   nextCursor: Schema.NullOr(Schema.String),
+})
+const RateLimitWindow = Schema.Struct({
+  usedPercent: Schema.Number,
+  windowDurationMins: Schema.NullOr(Schema.Number),
+  resetsAt: Schema.NullOr(Schema.Number),
+})
+const RateLimitSnapshot = Schema.Struct({
+  limitId: Schema.NullOr(Schema.String),
+  limitName: Schema.NullOr(Schema.String),
+  primary: Schema.NullOr(RateLimitWindow),
+  secondary: Schema.NullOr(RateLimitWindow),
+  planType: Schema.NullOr(Schema.String),
+})
+const RateLimitsResponse = Schema.Struct({
+  rateLimits: RateLimitSnapshot,
+  rateLimitsByLimitId: Schema.optionalKey(
+    Schema.NullOr(Schema.Record(Schema.String, RateLimitSnapshot)),
+  ),
 })
 
 const readProcess = async (process: Bun.Subprocess<"ignore", "pipe", "pipe">) => {
@@ -283,6 +303,15 @@ export const layer = Layer.effect(
       return decoded.data
     })
 
+    const readRateLimits = Effect.fn("CodexAppServer.readRateLimits")(function* () {
+      const response = yield* protocol.request("account/rateLimits/read", undefined)
+      const decoded = yield* decodeResponse(RateLimitsResponse, response, "account/rateLimits/read")
+      return {
+        rateLimits: decoded.rateLimits,
+        rateLimitsByLimitId: decoded.rateLimitsByLimitId ?? null,
+      } satisfies CodexRateLimits
+    })
+
     const ensureThread = Effect.fn("CodexAppServer.ensureThread")(function* (
       request: CodexRunRequest,
     ) {
@@ -403,6 +432,7 @@ export const layer = Layer.effect(
     return Service.of({
       status,
       listModels,
+      readRateLimits,
       run,
       steer,
       interrupt,

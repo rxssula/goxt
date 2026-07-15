@@ -21,6 +21,7 @@ import type {
   ApprovalDecision,
   CodexEvent,
   CodexModel,
+  CodexRateLimits,
   CodexStatus,
   CodexTurnSettings,
 } from "../codex/types.js"
@@ -40,6 +41,7 @@ interface Callbacks {
   readonly onInterrupt: () => void
   readonly onApproval: (requestId: number | string, decision: ApprovalDecision) => void
   readonly onUserInput: (requestId: number | string, response: ToolRequestUserInputResponse) => void
+  readonly onUsage?: () => void
   readonly onQuit: () => void
 }
 
@@ -53,6 +55,71 @@ type PendingInteraction =
 
 const shortenPath = (path: string, max = 58): string =>
   path.length <= max ? path : `…${path.slice(-(max - 1))}`
+
+const formatTokens = (tokens: number): string =>
+  new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(tokens)
+
+const formatPercent = (percent: number): string => `${percent.toFixed(percent >= 10 ? 0 : 1)}%`
+
+const formatWindowDuration = (minutes: number): string => {
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)}d`
+  if (minutes % 60 === 0) return `${minutes / 60}h`
+  return `${minutes}m`
+}
+
+const formatReset = (resetsAt: number | null): string =>
+  resetsAt === null ? "reset time unavailable" : `resets ${new Date(resetsAt * 1_000).toLocaleString()}`
+
+type TokenUsageDetails = {
+  readonly totalTokens: number
+  readonly lastTokens: number
+  readonly contextWindow: number | null
+}
+
+export const formatCodexUsage = (
+  rateLimits: CodexRateLimits,
+  tokenUsage: TokenUsageDetails | undefined,
+): string => {
+  const snapshots = Object.values(rateLimits.rateLimitsByLimitId ?? {})
+  const limits = snapshots.length > 0 ? snapshots : [rateLimits.rateLimits]
+  const lines = ["Account limits"]
+
+  for (const snapshot of limits) {
+    const name = snapshot.limitName ?? snapshot.limitId ?? "Codex"
+    lines.push(`  ${name}${snapshot.planType ? ` · ${snapshot.planType}` : ""}`)
+    for (const [label, window] of [
+      ["Primary", snapshot.primary],
+      ["Secondary", snapshot.secondary],
+    ] as const) {
+      if (window === null) continue
+      const duration =
+        window.windowDurationMins === null
+          ? "window"
+          : `${formatWindowDuration(window.windowDurationMins)} window`
+      lines.push(
+        `    ${label}: ${formatPercent(window.usedPercent)} used · ${duration} · ${formatReset(window.resetsAt)}`,
+      )
+    }
+  }
+
+  lines.push("", "Context window")
+  if (tokenUsage === undefined) {
+    lines.push("  No token usage reported yet. Run a turn to see context details.")
+  } else {
+    lines.push(`  Latest turn: ${formatTokens(tokenUsage.lastTokens)} tokens`)
+    lines.push(`  Thread total: ${formatTokens(tokenUsage.totalTokens)} tokens`)
+    if (tokenUsage.contextWindow === null) {
+      lines.push("  Capacity: unavailable")
+    } else {
+      lines.push(`  Capacity: ${formatTokens(tokenUsage.contextWindow)} tokens`)
+      lines.push(
+        `  Latest turn utilization: ${formatPercent((tokenUsage.lastTokens / tokenUsage.contextWindow) * 100)}`,
+      )
+    }
+  }
+
+  return lines.join("\n")
+}
 
 const createMarkdownSyntaxStyle = (): SyntaxStyle =>
   SyntaxStyle.fromStyles({
@@ -106,6 +173,7 @@ export class HarnessView {
   private readonly settingsStatus: TextRenderable
   private readonly markdownSyntaxStyle: SyntaxStyle
   private readonly onSettingsChange: ((settings: CodexTurnSettings) => void) | undefined
+  private readonly onUsage: (() => void) | undefined
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
   private busy = false
@@ -119,6 +187,7 @@ export class HarnessView {
   private matchingSlashCommands: ReadonlyArray<SlashCommandSuggestion> = []
   private selectedSlashCommand = 0
   private dismissedSlashCommandValue: string | undefined
+  private latestTokenUsage: TokenUsageDetails | undefined
   private readonly streamingMessages = new Map<
     string,
     { readonly renderable: MarkdownRenderable; text: string }
@@ -132,6 +201,7 @@ export class HarnessView {
   ) {
     this.renderer = renderer
     this.onSettingsChange = callbacks.onSettingsChange
+    this.onUsage = callbacks.onUsage
     this.selectedModel = initialSettings.model
     this.selectedReasoningEffort = initialSettings.reasoningEffort
     this.markdownSyntaxStyle = createMarkdownSyntaxStyle()
@@ -508,6 +578,12 @@ export class HarnessView {
         break
       }
       case "TokenUsage":
+        this.latestTokenUsage = {
+          totalTokens: event.totalTokens,
+          lastTokens: event.lastTokens,
+          contextWindow: event.contextWindow,
+        }
+        this.updateSettingsStatus()
         break
       case "ApprovalRequested":
         this.pendingInteraction = { _tag: "Approval", requestId: event.requestId }
@@ -694,8 +770,12 @@ export class HarnessView {
       case "Help":
         this.showCommandMessage(
           "commands",
-          "/clear                 start a new session and clear the screen\n/model                 open model picker\n/model <id>            switch model directly\n/model default         use the catalog default\n/reasoning             open reasoning picker\n/reasoning <level>     switch reasoning directly\n/reasoning default     use the model default",
+          "/clear                 start a new session and clear the screen\n/model                 open model picker\n/model <id>            switch model directly\n/model default         use the catalog default\n/reasoning             open reasoning picker\n/reasoning <level>     switch reasoning directly\n/reasoning default     use the model default\n/usage                 show account limits and context usage",
         )
+        return
+      case "Usage":
+        this.showCommandMessage("usage", "Fetching current limits…")
+        this.onUsage?.()
         return
       case "Unknown":
         this.showCommandMessage(
@@ -715,6 +795,7 @@ export class HarnessView {
 
   private clearSession(): void {
     this.sessionId = undefined
+    this.latestTokenUsage = undefined
     this.pendingInteraction = undefined
     this.streamingMessages.clear()
     for (const child of this.transcript.getChildren()) {
@@ -1012,7 +1093,23 @@ export class HarnessView {
     const model = this.activeModel()
     const modelLabel = model?.model ?? "default model"
     const effortLabel = model === undefined ? "default reasoning" : this.activeReasoningEffort(model)
-    this.settingsStatus.content = t`${fg(theme.subtle)(`${modelLabel} · ${effortLabel}`)}`
+    const contextLabel =
+      this.latestTokenUsage === undefined
+        ? undefined
+        : this.latestTokenUsage.contextWindow === null
+          ? `context ${formatTokens(this.latestTokenUsage.lastTokens)}`
+          : `context ${formatTokens(this.latestTokenUsage.lastTokens)}/${formatTokens(this.latestTokenUsage.contextWindow)}`
+    this.settingsStatus.content = t`${fg(theme.subtle)(
+      [modelLabel, effortLabel, contextLabel].filter(Boolean).join(" · "),
+    )}`
+  }
+
+  showUsage(rateLimits: CodexRateLimits): void {
+    this.showCommandMessage("usage", formatCodexUsage(rateLimits, this.latestTokenUsage))
+  }
+
+  usageFailed(message: string): void {
+    this.showCommandMessage("usage", message, true)
   }
 
   private showSpinner(): void {

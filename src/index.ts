@@ -127,6 +127,18 @@ const view = new HarnessView(renderer, cwd, {
   },
   onApproval: respondApproval,
   onUserInput: respondUserInput,
+  onUsage: () => {
+    const loadUsage = Effect.gen(function* () {
+      const codex = yield* CodexAppServer.Service
+      return yield* codex.readRateLimits()
+    })
+    void runWithCodex(loadUsage)
+      .then((rateLimits) => view.showUsage(rateLimits))
+      .catch((error: unknown) => {
+        if (quitting) return
+        view.usageFailed(error instanceof Error ? error.message : "Could not read current usage.")
+      })
+  },
   onQuit: () => {
     quitting = true
     view.destroy()
