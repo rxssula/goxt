@@ -1,0 +1,116 @@
+import { Schema } from "effect"
+import type {
+  CommandExecutionRequestApprovalParams,
+  FileChangeRequestApprovalParams,
+  ToolRequestUserInputQuestion,
+} from "./generated/protocol.js"
+
+export const CodexStatus = Schema.Struct({
+  available: Schema.Boolean,
+  authenticated: Schema.Boolean,
+  version: Schema.String,
+})
+
+export interface CodexStatus extends Schema.Schema.Type<typeof CodexStatus> {}
+
+export const CodexRunRequest = Schema.Struct({
+  prompt: Schema.String,
+  cwd: Schema.String,
+  sessionId: Schema.optionalKey(Schema.String),
+  model: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+})
+
+export interface CodexRunRequest extends Schema.Schema.Type<typeof CodexRunRequest> {}
+
+export interface CodexTurnSettings {
+  readonly model?: string | null
+  readonly reasoningEffort?: string | null
+}
+
+export interface CodexModel {
+  readonly id: string
+  readonly model: string
+  readonly displayName: string
+  readonly description: string
+  readonly supportedReasoningEfforts: ReadonlyArray<{
+    readonly reasoningEffort: string
+    readonly description: string
+  }>
+  readonly defaultReasoningEffort: string
+  readonly isDefault: boolean
+}
+
+export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel"
+
+export type CodexEvent =
+  | { readonly _tag: "ThreadStarted"; readonly threadId: string }
+  | { readonly _tag: "TurnStarted"; readonly turnId: string }
+  | { readonly _tag: "AgentMessageDelta"; readonly itemId: string; readonly delta: string }
+  | { readonly _tag: "AgentMessageCompleted"; readonly itemId: string; readonly text: string }
+  | { readonly _tag: "CommandOutput"; readonly itemId: string; readonly delta: string }
+  | { readonly _tag: "Activity"; readonly label: string }
+  | {
+      readonly _tag: "PlanUpdated"
+      readonly explanation: string | null
+      readonly steps: ReadonlyArray<{ readonly step: string; readonly status: string }>
+    }
+  | {
+      readonly _tag: "TokenUsage"
+      readonly totalTokens: number
+      readonly contextWindow: number | null
+    }
+  | {
+      readonly _tag: "ApprovalRequested"
+      readonly requestId: number | string
+      readonly kind: "command" | "file-change"
+      readonly prompt: string
+      readonly params: CommandExecutionRequestApprovalParams | FileChangeRequestApprovalParams
+    }
+  | {
+      readonly _tag: "UserInputRequested"
+      readonly requestId: number | string
+      readonly questions: ReadonlyArray<ToolRequestUserInputQuestion>
+    }
+  | { readonly _tag: "TurnCompleted"; readonly turnId: string; readonly status: string }
+  | { readonly _tag: "TurnFailed"; readonly message: string }
+  | { readonly _tag: "Unknown"; readonly method: string; readonly params: unknown }
+
+export class CodexUnavailable extends Schema.TaggedErrorClass<CodexUnavailable>()(
+  "CodexUnavailable",
+  { message: Schema.String },
+) {}
+
+export class CodexNotAuthenticated extends Schema.TaggedErrorClass<CodexNotAuthenticated>()(
+  "CodexNotAuthenticated",
+  { message: Schema.String },
+) {}
+
+export class CodexProcessError extends Schema.TaggedErrorClass<CodexProcessError>()(
+  "CodexProcessError",
+  {
+    message: Schema.String,
+    exitCode: Schema.Number,
+  },
+) {}
+
+export class CodexProtocolError extends Schema.TaggedErrorClass<CodexProtocolError>()(
+  "CodexProtocolError",
+  {
+    message: Schema.String,
+    line: Schema.optionalKey(Schema.String),
+  },
+) {}
+
+export class CodexRpcError extends Schema.TaggedErrorClass<CodexRpcError>()("CodexRpcError", {
+  message: Schema.String,
+  code: Schema.Number,
+  data: Schema.optionalKey(Schema.Unknown),
+}) {}
+
+export type CodexRunError =
+  | CodexUnavailable
+  | CodexNotAuthenticated
+  | CodexProcessError
+  | CodexProtocolError
+  | CodexRpcError

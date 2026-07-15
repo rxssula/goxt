@@ -1,0 +1,21 @@
+{
+  "name": "goxt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@opentui/core": "0.4.3",
+    "effect": "4.0.0-beta.98",
+    "opentui-spinner": "0.0.7"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
