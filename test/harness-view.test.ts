@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { createMockKeys, createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
+import {
+  createMockKeys,
+  createTestRenderer,
+  type TestRendererSetup,
+} from "@opentui/core/testing"
 import { HarnessView } from "../src/ui/harness-view.js"
 import type { CodexModel, CodexTurnSettings } from "../src/codex/types.js"
 
@@ -87,6 +91,38 @@ describe("HarnessView", () => {
     expect(frame).toContain("Inspect the repository")
     expect(frame).toContain("codex")
     expect(frame).toContain("The repository is ready.")
+  })
+
+  test("renders agent Markdown and hides fenced-code markers", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 36 })
+    const { renderer, renderOnce, captureCharFrame } = testRenderer
+
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+    view.begin("Show me the result")
+    view.handleEvent({
+      _tag: "AgentMessageCompleted",
+      itemId: "message-1",
+      text: [
+        "# Result",
+        "",
+        "The answer is **ready** and uses `MarkdownRenderable`.",
+        "",
+        "```typescript",
+        "const answer: number = 42",
+        "```",
+      ].join("\n"),
+    })
+
+    await renderOnce()
+    await new Promise<void>((resolve) => setTimeout(resolve, 500))
+    await renderOnce()
+    const frame = captureCharFrame()
+
+    expect(frame).toContain("Result")
+    expect(frame).toContain("The answer is ready")
+    expect(frame).toContain("const answer: number = 42")
+    expect(frame).not.toContain("# Result")
+    expect(frame).not.toContain("```typescript")
   })
 
   test("opens a model picker without submitting a turn", async () => {

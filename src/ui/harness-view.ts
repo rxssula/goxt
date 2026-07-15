@@ -4,9 +4,11 @@ import {
   fg,
   InputRenderable,
   InputRenderableEvents,
+  MarkdownRenderable,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
+  SyntaxStyle,
   t,
   TextRenderable,
   type CliRenderer,
@@ -52,6 +54,47 @@ type PendingInteraction =
 const shortenPath = (path: string, max = 58): string =>
   path.length <= max ? path : `…${path.slice(-(max - 1))}`
 
+const createMarkdownSyntaxStyle = (): SyntaxStyle =>
+  SyntaxStyle.fromStyles({
+    comment: { fg: theme.subtle, dim: true },
+    constant: { fg: "#F9E2AF" },
+    "constant.builtin": { fg: "#FAB387" },
+    constructor: { fg: "#89DCEB", bold: true },
+    function: { fg: "#89DCEB", bold: true },
+    "function.builtin": { fg: "#89DCEB" },
+    "function.method": { fg: "#74C7EC" },
+    keyword: { fg: "#CBA6F7", bold: true },
+    "keyword.directive": { fg: "#CBA6F7" },
+    label: { fg: "#F9E2AF" },
+    number: { fg: "#FAB387" },
+    operator: { fg: "#F38BA8" },
+    property: { fg: "#89B4FA" },
+    "punctuation.bracket": { fg: theme.muted },
+    "punctuation.delimiter": { fg: theme.muted },
+    "punctuation.special": { fg: theme.muted },
+    string: { fg: "#A6E3A1" },
+    "string.escape": { fg: "#F2CDCD" },
+    type: { fg: "#74C7EC", bold: true },
+    variable: { fg: theme.text },
+    "variable.builtin": { fg: "#89DCEB" },
+    "markup.heading.1": { fg: theme.accent, bold: true },
+    "markup.heading.2": { fg: theme.accent, bold: true },
+    "markup.heading.3": { fg: theme.accent, bold: true },
+    "markup.heading.4": { fg: theme.accent, bold: true },
+    "markup.heading.5": { fg: theme.accent, bold: true },
+    "markup.heading.6": { fg: theme.accent, bold: true },
+    "markup.strong": { fg: theme.text, bold: true },
+    "markup.italic": { fg: theme.text, italic: true },
+    "markup.strikethrough": { fg: theme.muted },
+    "markup.link": { fg: theme.accent, underline: true },
+    "markup.link.label": { fg: theme.accent },
+    "markup.link.url": { fg: theme.muted, underline: true },
+    "markup.list": { fg: theme.accent, bold: true },
+    "markup.quote": { fg: theme.muted, italic: true },
+    "markup.raw": { fg: theme.accent },
+    "markup.raw.block": { fg: theme.text },
+  })
+
 export class HarnessView {
   readonly input: InputRenderable
 
@@ -61,6 +104,7 @@ export class HarnessView {
   private readonly status: TextRenderable
   private readonly spinner: SpinnerRenderable
   private readonly settingsStatus: TextRenderable
+  private readonly markdownSyntaxStyle: SyntaxStyle
   private readonly onSettingsChange: ((settings: CodexTurnSettings) => void) | undefined
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
@@ -77,7 +121,7 @@ export class HarnessView {
   private dismissedSlashCommandValue: string | undefined
   private readonly streamingMessages = new Map<
     string,
-    { readonly renderable: TextRenderable; text: string }
+    { readonly renderable: MarkdownRenderable; text: string }
   >()
 
   constructor(
@@ -90,6 +134,7 @@ export class HarnessView {
     this.onSettingsChange = callbacks.onSettingsChange
     this.selectedModel = initialSettings.model
     this.selectedReasoningEffort = initialSettings.reasoningEffort
+    this.markdownSyntaxStyle = createMarkdownSyntaxStyle()
 
     const shell = new BoxRenderable(renderer, {
       id: "shell",
@@ -429,7 +474,7 @@ export class HarnessView {
       case "AgentMessageDelta": {
         let message = this.streamingMessages.get(event.itemId)
         if (message === undefined) {
-          message = { renderable: this.addMessage("codex", "", theme.accent), text: "" }
+          message = { renderable: this.addMarkdownMessage("codex", "", theme.accent), text: "" }
           this.streamingMessages.set(event.itemId, message)
         }
         message.text += event.delta
@@ -439,9 +484,13 @@ export class HarnessView {
       }
       case "AgentMessageCompleted": {
         const message = this.streamingMessages.get(event.itemId)
-        if (message === undefined) this.addMessage("codex", event.text, theme.accent)
+        if (message === undefined) {
+          const body = this.addMarkdownMessage("codex", event.text, theme.accent)
+          body.streaming = false
+        }
         else {
           message.renderable.content = event.text
+          message.renderable.streaming = false
           this.streamingMessages.delete(event.itemId)
         }
         break
@@ -535,6 +584,7 @@ export class HarnessView {
   }
 
   destroy(): void {
+    this.markdownSyntaxStyle.destroy()
     this.renderer.destroy()
   }
 
@@ -1019,6 +1069,38 @@ export class HarnessView {
       content,
       fg: label === "error" ? theme.error : theme.text,
       width: "100%",
+    })
+    message.add(body)
+    this.transcript.add(message)
+    this.transcript.scrollTo(Number.MAX_SAFE_INTEGER)
+    return body
+  }
+
+  private addMarkdownMessage(
+    label: string,
+    content: string,
+    color: string,
+  ): MarkdownRenderable {
+    const message = new BoxRenderable(this.renderer, {
+      width: "100%",
+      flexDirection: "column",
+      marginBottom: 1,
+    })
+    message.add(
+      new TextRenderable(this.renderer, {
+        content: t`${bold(fg(color)(label))}`,
+        height: 1,
+      }),
+    )
+    const body = new MarkdownRenderable(this.renderer, {
+      content,
+      syntaxStyle: this.markdownSyntaxStyle,
+      fg: label === "error" ? theme.error : theme.text,
+      width: "100%",
+      conceal: true,
+      concealCode: true,
+      streaming: true,
+      internalBlockMode: "coalesced",
     })
     message.add(body)
     this.transcript.add(message)
