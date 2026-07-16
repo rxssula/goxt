@@ -3,6 +3,7 @@ import {
   BoxRenderable,
   fg,
   MarkdownRenderable,
+  type PasteEvent,
   ScrollBoxRenderable,
   SelectRenderable,
   SelectRenderableEvents,
@@ -14,12 +15,16 @@ import {
   type KeyEvent,
   type SelectOption,
 } from "@opentui/core"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { rmSync } from "node:fs"
 import { SpinnerRenderable } from "opentui-spinner"
 import type { ToolRequestUserInputResponse } from "../codex/generated/protocol.js"
 import {
   unsupportedApprovalMessage,
   type ApprovalDecision,
   type CodexEvent,
+  type CodexImageInput,
   type CodexModel,
   type CodexRateLimits,
   type CodexSession,
@@ -27,6 +32,13 @@ import {
   type CodexStatus,
   type CodexTurnSettings,
 } from "../codex/types.js"
+import {
+  decodeImage,
+  detectImageFormat,
+  encodeImageAsPng,
+  readMacClipboardImage,
+  resizeImage,
+} from "./image-codec.js"
 import { theme } from "./theme.js"
 import {
   parseSlashCommand,
@@ -39,6 +51,7 @@ import {
 class PromptTextarea extends TextareaRenderable {
   private _maxLength = 8_000
   onValueChange: ((value: string) => void) | undefined
+  onImagePaste: ((event: PasteEvent) => void) | undefined
 
   get value(): string {
     return this.plainText
@@ -62,12 +75,29 @@ class PromptTextarea extends TextareaRenderable {
     const available = this._maxLength - this.plainText.length
     if (available > 0) super.insertText(text.slice(0, available))
   }
+
+
+  override handlePaste(event: PasteEvent): void {
+    if (
+      event.bytes.length === 0 ||
+      event.metadata?.mimeType?.startsWith("image/") ||
+      event.metadata?.kind === "binary"
+    ) {
+      this.onImagePaste?.(event)
+      return
+    }
+    super.handlePaste(event)
+  }
 }
 
 interface Callbacks {
-  readonly onSubmit: (prompt: string, settings: CodexTurnSettings) => void
+  readonly onSubmit: (
+    prompt: string,
+    settings: CodexTurnSettings,
+    images: ReadonlyArray<CodexImageInput>,
+  ) => void
   readonly onSettingsChange?: (settings: CodexTurnSettings) => void
-  readonly onSteer: (prompt: string) => void
+  readonly onSteer: (prompt: string, images: ReadonlyArray<CodexImageInput>) => void
   readonly onInterrupt: () => void
   readonly onApproval: (
     requestId: number | string,
@@ -81,6 +111,7 @@ interface Callbacks {
   readonly onSessions?: () => void
   readonly onSessionSelect?: (sessionId: string) => void
   readonly onQuit: () => void
+  readonly writeTerminal?: (sequence: string) => void
 }
 
 type PendingInteraction =
@@ -239,6 +270,14 @@ export class HarnessView {
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
   private readonly composer: BoxRenderable
+  private readonly imagePreview: BoxRenderable
+  private readonly imagePreviewBitmap: TextRenderable
+  private readonly attachments = new Map<string, CodexImageInput>()
+  private readonly ownedAttachmentPaths = new Set<string>()
+  private nextImageNumber = 1
+  private readonly writeTerminal: ((sequence: string) => void) | undefined
+  private readonly kittyImageId = 0x676f78
+  private previewGeneration = 0
   private busy = false
   private sessionId: string | undefined
   private models: ReadonlyArray<CodexModel> = []
@@ -246,6 +285,7 @@ export class HarnessView {
   private selectedReasoningEffort: string | null | undefined
   private codexStatus: CodexStatus | undefined
   private pickerOverlay: BoxRenderable | undefined
+  private pickerSelect: SelectRenderable | undefined
   private readonly pendingInteractions = new Map<number | string, PendingInteraction>()
   private readonly interactionTimers = new Map<number | string, ReturnType<typeof setTimeout>>()
   private planBody: TextRenderable | undefined
@@ -273,6 +313,7 @@ export class HarnessView {
     this.onSessions = callbacks.onSessions
     this.onSessionSelect = callbacks.onSessionSelect
     this.onUserInput = callbacks.onUserInput
+    this.writeTerminal = callbacks.writeTerminal
     this.selectedModel = initialSettings.model
     this.selectedReasoningEffort = initialSettings.reasoningEffort
     this.markdownSyntaxStyle = createMarkdownSyntaxStyle()
@@ -430,6 +471,28 @@ export class HarnessView {
       return row
     })
 
+    this.imagePreview = new BoxRenderable(renderer, {
+      id: "image-preview",
+      position: "absolute",
+      bottom: 4,
+      left: "15%",
+      zIndex: 40,
+      width: "70%",
+      height: 16,
+      borderStyle: "rounded",
+      borderColor: theme.borderFocused,
+      backgroundColor: theme.background,
+      padding: 1,
+      visible: false,
+    })
+    this.imagePreviewBitmap = new TextRenderable(renderer, {
+      id: "image-preview-bitmap",
+      width: "100%",
+      height: "100%",
+      selectable: false,
+    })
+    this.imagePreview.add(this.imagePreviewBitmap)
+
     this.composer = new BoxRenderable(renderer, {
       id: "composer",
       width: "100%",
@@ -480,6 +543,7 @@ export class HarnessView {
     this.shell.add(main)
     this.shell.add(statusBar)
     this.shell.add(this.slashCommandMenu)
+    this.shell.add(this.imagePreview)
     this.shell.add(this.composer)
     renderer.root.add(this.shell)
     this.applyResponsiveLayout(renderer.width, renderer.height)
@@ -499,7 +563,10 @@ export class HarnessView {
       }
       const prompt = value.trim()
       if (!prompt) return
+      const images = this.activeAttachments(value)
+      for (const image of images) this.attachments.delete(image.label)
       this.input.value = ""
+      this.hideImagePreview()
       this.updateComposerHeight()
 
       const pendingInteraction = this.activeInteraction()
@@ -548,23 +615,36 @@ export class HarnessView {
       if (this.busy) {
         this.addMessage("you · steer", prompt, theme.user)
         this.showSpinner()
-        callbacks.onSteer(prompt)
+        callbacks.onSteer(prompt, images)
         return
       }
-      callbacks.onSubmit(prompt, this.turnSettings())
+      callbacks.onSubmit(prompt, this.turnSettings(), images)
     }
 
     const inputChanged = (value: string) => {
+      for (const [token, attachment] of this.attachments) {
+        if (!value.includes(token)) {
+          this.attachments.delete(token)
+          this.cleanupAttachment(attachment)
+        }
+      }
       if (value !== this.dismissedSlashCommandValue) this.dismissedSlashCommandValue = undefined
       this.updateSlashCommandMenu(value)
       queueMicrotask(() => this.updateComposerHeight())
     }
     this.input.onValueChange = inputChanged
     this.input.onContentChange = () => inputChanged(this.input.value)
+    this.input.onCursorChange = () => void this.updateImagePreview()
+    this.input.onImagePaste = (event) => void this.addPastedImage(event)
 
     renderer.keyInput.on("keypress", (key) => {
       if (key.ctrl && key.name === "c") {
         callbacks.onQuit()
+        return
+      }
+      if (process.platform === "darwin" && (key.super || key.meta || key.ctrl) && key.name === "v" && this.input.focused) {
+        key.preventDefault()
+        void this.pasteImageFromSystemClipboard()
         return
       }
       if (key.ctrl && key.name === "p") {
@@ -575,6 +655,14 @@ export class HarnessView {
       if (key.name === "escape" && this.pickerOverlay !== undefined) {
         this.closePicker()
         return
+      }
+      if (this.pickerSelect !== undefined && !key.ctrl && !key.meta && !key.super) {
+        if (key.name === "j" || key.name === "k") {
+          if (key.name === "j") this.pickerSelect.moveDown()
+          else this.pickerSelect.moveUp()
+          key.preventDefault()
+          return
+        }
       }
       if (key.super && key.name === "l") {
         this.input.focus()
@@ -605,6 +693,117 @@ export class HarnessView {
 
   get currentSessionId(): string | undefined {
     return this.sessionId
+  }
+
+  private activeAttachments(value = this.input.value): ReadonlyArray<CodexImageInput> {
+    return [...this.attachments.entries()]
+      .filter(([token]) => value.includes(token))
+      .map(([, attachment]) => attachment)
+  }
+
+  private async addPastedImage(event: PasteEvent): Promise<void> {
+    event.preventDefault()
+    event.stopPropagation()
+    if (event.bytes.length === 0) await this.pasteImageFromSystemClipboard()
+    else await this.addPastedImageBytes(event.bytes, event.metadata?.mimeType)
+  }
+
+  private async pasteImageFromSystemClipboard(): Promise<void> {
+    const image = await readMacClipboardImage()
+    if (image !== undefined) await this.addPastedImageBytes(image.bytes, image.mimeType)
+  }
+
+  private async addPastedImageBytes(bytes: Uint8Array, mime?: string): Promise<void> {
+    const format = detectImageFormat(bytes)
+    if (format === undefined) {
+      this.showCommandMessage("image", "Only PNG, JPEG, and TIFF images are supported.", true)
+      return
+    }
+    const extension = format.toLowerCase().replace("jpeg", "jpg")
+    const path = join(tmpdir(), `goxt-${crypto.randomUUID()}.${extension}`)
+    await Bun.write(path, bytes)
+    const label = `[Image #${this.nextImageNumber++}]`
+    this.attachments.set(label, { path, label })
+    this.ownedAttachmentPaths.add(path)
+    this.input.insertText(label)
+    await this.showImagePreview(label)
+  }
+
+  private async updateImagePreview(): Promise<void> {
+    const cursor = this.input.cursorOffset
+    const match = [...this.attachments.keys()].find((token) => {
+      const start = this.input.value.indexOf(token)
+      return start >= 0 && cursor >= start && cursor <= start + token.length
+    })
+    if (match === undefined) this.hideImagePreview()
+    else await this.showImagePreview(match)
+  }
+
+  private async showImagePreview(token: string): Promise<void> {
+    const generation = ++this.previewGeneration
+    const attachment = this.attachments.get(token)
+    if (attachment === undefined || !this.input.value.includes(token)) return
+    try {
+      const width = Math.min(70, Math.max(20, this.renderer.width - 12))
+      const height = Math.min(18, Math.max(8, this.renderer.height - 10))
+      const source = decodeImage(new Uint8Array(await Bun.file(attachment.path).arrayBuffer()))
+      if (generation !== this.previewGeneration) return
+      const image = resizeImage(source, width, height * 2)
+      if (!this.input.value.includes(token)) return
+      this.imagePreview.width = image.width + 2
+      this.imagePreview.height = Math.ceil(image.height / 2) + 2
+      this.imagePreview.left = Math.max(0, Math.floor((this.renderer.width - this.imagePreview.width) / 2))
+      this.imagePreview.bottom = this.composer.height + 1
+      this.imagePreview.title = `${token} · ${source.format} · ${source.width}×${source.height}`
+      const shades = " .:-=+*#%@"
+      const rows: string[] = []
+      for (let y = 0; y < image.height; y += 2) {
+        let row = ""
+        for (let x = 0; x < image.width; x += 1) {
+          const top = (y * image.width + x) * 4
+          const bottom = (Math.min(image.height - 1, y + 1) * image.width + x) * 4
+          const luminance = (
+            image.data[top]! * 0.2126 + image.data[top + 1]! * 0.7152 + image.data[top + 2]! * 0.0722 +
+            image.data[bottom]! * 0.2126 + image.data[bottom + 1]! * 0.7152 + image.data[bottom + 2]! * 0.0722
+          ) / 2
+          row += shades[Math.min(shades.length - 1, Math.floor(luminance / 256 * shades.length))]
+        }
+        rows.push(row)
+      }
+      this.imagePreviewBitmap.content = rows.join("\n")
+      this.imagePreview.visible = true
+      if (this.writeTerminal !== undefined && this.renderer.capabilities?.kitty_graphics) {
+        // Wait until OpenTUI has laid out and painted the overlay, then place a
+        // Kitty image in its content rectangle. Ghostty supports this protocol.
+        await this.renderer.idle()
+        if (generation !== this.previewGeneration) return
+        const previewPath = `${attachment.path}.preview.png`
+        await Bun.write(previewPath, encodeImageAsPng(source))
+        if (generation !== this.previewGeneration) return
+        const path = Buffer.from(previewPath).toString("base64")
+        const column = this.imagePreview.screenX + 2
+        const row = this.imagePreview.screenY + 2
+        const columns = Math.max(1, this.imagePreview.width - 2)
+        const rows = Math.max(1, this.imagePreview.height - 2)
+        this.writeTerminal(
+          `\x1b7\x1b[${row};${column}H` +
+          `\x1b_Ga=T,t=f,f=100,q=2,C=1,i=${this.kittyImageId},c=${columns},r=${rows};${path}\x1b\\` +
+          "\x1b8",
+        )
+        // The real bitmap replaces the character fallback on capable terminals.
+        this.imagePreviewBitmap.content = ""
+      }
+    } catch {
+      if (generation === this.previewGeneration) this.hideImagePreview()
+    }
+  }
+
+  private hideImagePreview(): void {
+    this.previewGeneration += 1
+    if (this.imagePreview.visible && this.writeTerminal !== undefined) {
+      this.writeTerminal(`\x1b_Ga=d,d=i,i=${this.kittyImageId},q=2\x1b\\`)
+    }
+    this.imagePreview.visible = false
   }
 
   setCodexStatus(codex: CodexStatus): void {
@@ -872,8 +1071,28 @@ export class HarnessView {
 
   destroy(): void {
     this.clearInteractions()
+    for (const attachment of this.attachments.values()) this.cleanupAttachment(attachment)
+    for (const path of this.ownedAttachmentPaths) this.cleanupPath(path)
     this.markdownSyntaxStyle.destroy()
     this.renderer.destroy()
+  }
+
+  releaseAttachments(images: ReadonlyArray<CodexImageInput>): void {
+    for (const image of images) this.cleanupAttachment(image)
+  }
+
+  private cleanupAttachment(attachment: CodexImageInput): void {
+    this.cleanupPath(attachment.path)
+    this.cleanupPath(`${attachment.path}.preview.png`)
+  }
+
+  private cleanupPath(path: string): void {
+    this.ownedAttachmentPaths.delete(path)
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      // Cleanup is best-effort; files may already have been removed.
+    }
   }
 
   private turnSettings(): CodexTurnSettings {
@@ -1276,7 +1495,7 @@ export class HarnessView {
     dialog.add(select)
     dialog.add(
       new TextRenderable(this.renderer, {
-        content: "↑↓ navigate   Enter select   Esc cancel",
+        content: "↑↓/jk navigate   Enter select   Esc cancel",
         fg: theme.subtle,
         height: 1,
         selectable: false,
@@ -1285,6 +1504,7 @@ export class HarnessView {
     overlay.add(dialog)
     this.renderer.root.add(overlay)
     this.pickerOverlay = overlay
+    this.pickerSelect = select
     this.input.blur()
     select.focus()
   }
@@ -1293,6 +1513,7 @@ export class HarnessView {
     const overlay = this.pickerOverlay
     if (overlay === undefined) return
     this.pickerOverlay = undefined
+    this.pickerSelect = undefined
     overlay.parent?.remove(overlay)
     overlay.destroyRecursively()
     if (focusInput) this.input.focus()

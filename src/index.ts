@@ -10,6 +10,10 @@ import { theme } from "./ui/theme.js"
 const cwd = process.cwd()
 const initialSettings = await loadSettings()
 
+// OpenTUI temporarily intercepts process.stdout.write. Keep the original writer
+// for terminal protocols that must reach Ghostty verbatim (Kitty graphics).
+const writeTerminal = process.stdout.write.bind(process.stdout)
+
 const renderer = await createCliRenderer({
   screenMode: "alternate-screen",
   exitOnCtrlC: false,
@@ -66,7 +70,8 @@ const respondUserInput = (requestId: number | string, response: ToolRequestUserI
   )
 
 const view = new HarnessView(renderer, cwd, {
-  onSubmit: (prompt, settings) => {
+  writeTerminal: (sequence) => writeTerminal(sequence),
+  onSubmit: (prompt, settings, images) => {
     if (activeTurn !== undefined) return
 
     const turn: ActiveTurn = {
@@ -81,8 +86,8 @@ const view = new HarnessView(renderer, cwd, {
       const sessionId = view.currentSessionId
       return yield* codex.run(
         sessionId === undefined
-          ? { prompt, cwd, ...settings }
-          : { prompt, cwd, sessionId, ...settings },
+          ? { prompt, cwd, images: images.map((image) => image.path), ...settings }
+          : { prompt, cwd, sessionId, images: images.map((image) => image.path), ...settings },
         (event) => {
           if (event._tag === "ThreadStarted") turn.sessionId = event.threadId
           if (turn.sessionId === view.currentSessionId) view.handleEvent(event)
@@ -97,6 +102,7 @@ const view = new HarnessView(renderer, cwd, {
 
     void runWithCodex(run)
       .then((result) => {
+        view.releaseAttachments(images)
         if (activeTurn === turn) activeTurn = undefined
         if (quitting) return
         if (turn.sessionId !== view.currentSessionId) return
@@ -106,6 +112,7 @@ const view = new HarnessView(renderer, cwd, {
         } else view.fail(result.message)
       })
       .catch(() => {
+        view.releaseAttachments(images)
         if (activeTurn === turn) activeTurn = undefined
         if (!quitting) view.fail("The Codex app-server turn stopped unexpectedly.")
       })
@@ -113,13 +120,22 @@ const view = new HarnessView(renderer, cwd, {
   onSettingsChange: (settings) => {
     void saveSettings(settings)
   },
-  onSteer: (prompt) => {
-    runAction(
+  onSteer: (prompt, images) => {
+    void runWithCodex(
       Effect.gen(function* () {
         const codex = yield* CodexAppServer.Service
-        yield* codex.steer(prompt)
-      }),
-    )
+        yield* codex.steer(prompt, images.map((image) => image.path))
+      }).pipe(Effect.match({
+        onFailure: (error) => ({ ok: false as const, message: error.message }),
+        onSuccess: () => ({ ok: true as const }),
+      })),
+    ).then((result) => {
+      view.releaseAttachments(images)
+      if (!result.ok && !quitting) view.actionFailed(result.message)
+    }).catch(() => {
+      view.releaseAttachments(images)
+      if (!quitting) view.actionFailed("The Codex app-server action stopped unexpectedly.")
+    })
   },
   onInterrupt: () => {
     const turn = activeTurn

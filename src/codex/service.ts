@@ -30,7 +30,10 @@ export interface Interface {
     request: CodexRunRequest,
     onEvent: (event: CodexEvent) => void,
   ) => Effect.Effect<string, CodexRunError>
-  readonly steer: (prompt: string) => Effect.Effect<void, CodexRunError>
+  readonly steer: (
+    prompt: string,
+    images?: ReadonlyArray<string>,
+  ) => Effect.Effect<void, CodexRunError>
   readonly interrupt: () => Effect.Effect<void, CodexRunError>
   readonly respondApproval: (
     requestId: number | string,
@@ -180,6 +183,11 @@ const decodeResponse = <A, E>(
   )
 
 const textInput = (text: string) => [{ type: "text" as const, text, text_elements: [] }]
+
+const userInput = (text: string, images: ReadonlyArray<string> = []) => [
+  ...textInput(text),
+  ...images.map((path) => ({ type: "localImage" as const, path })),
+]
 
 export const canReuseThread = (
   currentThreadId: string | undefined,
@@ -483,7 +491,7 @@ export const layer = Layer.effect(
         const threadId = yield* ensureThread(request)
         const response = yield* protocol.request("turn/start", {
           threadId,
-          input: textInput(request.prompt),
+          input: userInput(request.prompt, request.images),
           cwd: request.cwd,
           ...(request.model === undefined ? {} : { model: request.model }),
           ...(request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort }),
@@ -508,7 +516,10 @@ export const layer = Layer.effect(
       return yield* workflow
     })
 
-    const steer = Effect.fn("CodexAppServer.steer")(function* (prompt: string) {
+    const steer = Effect.fn("CodexAppServer.steer")(function* (
+      prompt: string,
+      images: ReadonlyArray<string> = [],
+    ) {
       const active = yield* Ref.get(activeRun)
       if (active?.threadId === undefined || active.turnId === undefined) {
         return yield* Effect.fail(
@@ -517,7 +528,7 @@ export const layer = Layer.effect(
       }
       const response = yield* protocol.request("turn/steer", {
         threadId: active.threadId,
-        input: textInput(prompt),
+        input: userInput(prompt, images),
         expectedTurnId: active.turnId,
       })
       yield* decodeResponse(SteerResponse, response, "turn/steer")

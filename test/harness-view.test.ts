@@ -5,9 +5,22 @@ import {
   type TestRendererSetup,
 } from "@opentui/core/testing"
 import { HarnessView } from "../src/ui/harness-view.js"
-import type { ApprovalDecision, CodexModel, CodexTurnSettings } from "../src/codex/types.js"
+import type {
+  ApprovalDecision,
+  CodexModel,
+  CodexSession,
+  CodexTurnSettings,
+} from "../src/codex/types.js"
 
 let testRenderer: TestRendererSetup | undefined
+
+const waitFor = async (condition: () => boolean, timeoutMs = 1_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Condition was not met within ${timeoutMs} ms`)
+    await Bun.sleep(5)
+  }
+}
 
 const callbacks = {
   onSubmit: () => undefined,
@@ -108,6 +121,34 @@ describe("HarnessView", () => {
     expect(view.input.value).toBe("")
     await renderOnce()
     expect(view.input.height).toBe(1)
+  })
+
+  test("turns pasted image bytes into a cursor token and submits the image", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24, kittyKeyboard: true })
+    const { renderer } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const submissions: Array<{ prompt: string; paths: ReadonlyArray<string> }> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onSubmit: (prompt, _settings, images) => {
+        submissions.push({ prompt, paths: images.map((image) => image.path) })
+      },
+    })
+
+    // A complete 1×1 transparent PNG.
+    const png = Uint8Array.from(Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XwX9WQAAAABJRU5ErkJggg==",
+      "base64",
+    ))
+    renderer.keyInput.processPaste(png, { kind: "binary", mimeType: "image/png" })
+    await waitFor(() => view.input.value === "[Image #1]")
+
+    expect(view.input.value).toBe("[Image #1]")
+    keys.pressEnter()
+    expect(submissions).toHaveLength(1)
+    expect(submissions[0]?.prompt).toBe("[Image #1]")
+    expect(submissions[0]?.paths[0]).toEndWith(".png")
+    expect(await Bun.file(submissions[0]!.paths[0]!).exists()).toBe(true)
   })
 
   test("switches between composer and j/k transcript navigation", async () => {
@@ -299,7 +340,7 @@ describe("HarnessView", () => {
     expect(frame).toContain("Choose model")
     expect(frame).toContain("GPT Default  gpt-default")
     expect(frame).toContain("GPT Deep  gpt-deep")
-    expect(frame).toContain("↑↓ navigate   Enter select   Esc cancel")
+    expect(frame).toContain("↑↓/jk navigate   Enter select   Esc cancel")
   })
 
   test("applies picker selections to the next turn", async () => {
@@ -332,6 +373,29 @@ describe("HarnessView", () => {
         settings: { model: "gpt-deep", reasoningEffort: "high" },
       },
     ])
+  })
+
+  test("navigates the sessions picker with j and k", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
+    const { renderer } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const selectedSessions: string[] = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onSessionSelect: (sessionId) => selectedSessions.push(sessionId),
+    })
+    const sessions: ReadonlyArray<CodexSession> = [
+      { id: "session-one", title: "One", cwd: "/workspace/goxt", updatedAt: 1, status: "idle" },
+      { id: "session-two", title: "Two", cwd: "/workspace/goxt", updatedAt: 2, status: "idle" },
+    ]
+
+    view.setSessions(sessions)
+    keys.pressKey("j")
+    keys.pressKey("k")
+    keys.pressKey("j")
+    keys.pressEnter()
+
+    expect(selectedSessions).toEqual(["session-two"])
   })
 
   test("restores saved settings and reports later changes", async () => {
