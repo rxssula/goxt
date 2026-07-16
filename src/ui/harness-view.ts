@@ -358,13 +358,16 @@ export class HarnessView {
 
     this.slashCommandMenu = new BoxRenderable(renderer, {
       id: "slash-command-menu",
+      position: "absolute",
+      bottom: 4,
+      left: 3,
+      zIndex: 50,
       width: 56,
       maxWidth: "100%",
       height: 0,
-      marginLeft: 2,
       borderStyle: "rounded",
       borderColor: theme.borderFocused,
-      backgroundColor: theme.surface,
+      backgroundColor: theme.background,
       paddingX: 1,
       flexDirection: "column",
       visible: false,
@@ -1248,7 +1251,9 @@ export class HarnessView {
   private applyResponsiveLayout(width: number, height: number): void {
     const narrow = width < 60
     const tiny = width < 40 || height < 14
-    this.shell.paddingX = narrow ? 1 : 3
+    const horizontalPadding = narrow ? 1 : 3
+    this.shell.paddingX = horizontalPadding
+    this.slashCommandMenu.left = horizontalPadding
     this.shell.paddingY = tiny ? 0 : 1
     this.headerPath.visible = !narrow
     this.settingsStatus.visible = width >= 70

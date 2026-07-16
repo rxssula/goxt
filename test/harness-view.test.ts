@@ -261,6 +261,35 @@ describe("HarnessView", () => {
     expect(frame).not.toContain("/reasoning Choose the reasoning effort")
   })
 
+  test("overlays slash command completions without shifting the main content", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30 })
+    const { renderer, renderOnce, captureCharFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+
+    await renderOnce()
+    const initialRow = captureCharFrame().split("\n").findIndex((row) =>
+      row.includes("A quiet terminal harness for Codex."),
+    )
+
+    view.input.value = "/"
+    await renderOnce()
+    const frameWithMenu = captureCharFrame()
+    const rowWithMenu = frameWithMenu.split("\n").findIndex((row) =>
+      row.includes("A quiet terminal harness for Codex."),
+    )
+
+    expect(frameWithMenu).toContain("/help Show available slash commands")
+    expect(rowWithMenu).toBe(initialRow)
+    const popupAndComposerBorders = frameWithMenu
+      .split("\n")
+      .filter((row) => row.includes("╭"))
+      .slice(-2)
+    expect(popupAndComposerBorders).toHaveLength(2)
+    expect(popupAndComposerBorders[0]?.indexOf("╭")).toBe(
+      popupAndComposerBorders[1]?.indexOf("╭"),
+    )
+  })
+
   test("fetches usage and renders context-window details", async () => {
     testRenderer = await createTestRenderer({ width: 110, height: 36 })
     const { renderer, renderOnce, captureCharFrame } = testRenderer
