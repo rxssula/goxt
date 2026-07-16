@@ -432,7 +432,7 @@ export class HarnessView {
       if (pendingInteraction?._tag === "Approval") {
         const decision = this.parseApproval(prompt, pendingInteraction.availableDecisions)
         if (decision === undefined) {
-          this.input.placeholder = "Type y, session, n, or cancel…"
+          this.activateNextInteraction()
           return
         }
         const requestId = pendingInteraction.requestId

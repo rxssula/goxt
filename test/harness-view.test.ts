@@ -424,6 +424,25 @@ describe("HarnessView", () => {
     await waitForFrame((frame) => frame.includes("No supported approval decision"))
   })
 
+  test("keeps invalid approval guidance limited to available decisions", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: 1,
+      kind: "file-change",
+      prompt: "Allow the file change?",
+      availableDecisions: ["accept"],
+      params: { threadId: "t", turnId: "turn", itemId: "item" },
+    })
+
+    view.input.value = "n"
+    view.input.submit()
+
+    expect(view.input.placeholder).toBe("Type accept…")
+  })
+
   test("drops unresolved interactions when a turn ends", async () => {
     testRenderer = await createTestRenderer({ width: 80, height: 24 })
     const { renderer } = testRenderer
