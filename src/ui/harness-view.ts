@@ -452,7 +452,7 @@ export class HarnessView {
         const values = prompt.split("|").map((answer) => answer.trim())
         const answers: Record<string, { readonly answers: ReadonlyArray<string> }> = {}
         interaction.questionIds.forEach((id, index) => {
-          answers[id] = { answers: [values[index] ?? values[0] ?? ""] }
+          answers[id] = { answers: [values[index] ?? ""] }
         })
         interaction.responding = true
         this.input.placeholder = "Sending answer…"

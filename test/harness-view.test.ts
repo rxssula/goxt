@@ -495,6 +495,41 @@ describe("HarnessView", () => {
     expect(responses).toEqual([{ answers: { token: { answers: [] } } }])
   })
 
+  test("keeps omitted answers empty for multiple questions", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const responses: Array<unknown> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onUserInput: (_id, response) => {
+        responses.push(response)
+      },
+    })
+    view.handleEvent({
+      _tag: "UserInputRequested",
+      requestId: "multiple",
+      autoResolutionMs: null,
+      questions: [
+        { id: "first", header: "First", question: "First answer", isOther: false, isSecret: false, options: null },
+        { id: "second", header: "Second", question: "Second answer", isOther: false, isSecret: false, options: null },
+        { id: "third", header: "Third", question: "Third answer", isOther: false, isSecret: false, options: null },
+      ],
+    })
+
+    view.input.value = "provided|"
+    view.input.submit()
+
+    expect(responses).toEqual([
+      {
+        answers: {
+          first: { answers: ["provided"] },
+          second: { answers: [""] },
+          third: { answers: [""] },
+        },
+      },
+    ])
+  })
+
   test("updates plan and activity in place and stays legible at compact sizes", async () => {
     testRenderer = await createTestRenderer({ width: 50, height: 16 })
     const { renderer, resize, waitForFrame, captureCharFrame } = testRenderer
