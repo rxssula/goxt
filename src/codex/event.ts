@@ -45,6 +45,7 @@ const CommandApproval = Schema.Struct({
   command: Schema.optionalKey(Schema.NullOr(Schema.String)),
   cwd: Schema.optionalKey(Schema.NullOr(Schema.String)),
   reason: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  availableDecisions: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Unknown))),
 })
 const FileChangeApproval = Schema.Struct({
   threadId: Schema.String,
@@ -54,6 +55,7 @@ const FileChangeApproval = Schema.Struct({
   grantRoot: Schema.optionalKey(Schema.NullOr(Schema.String)),
 })
 const UserInputRequest = Schema.Struct({
+  autoResolutionMs: Schema.NullOr(Schema.Number),
   questions: Schema.Array(
     Schema.Struct({
       id: Schema.String,
@@ -67,6 +69,16 @@ const UserInputRequest = Schema.Struct({
     }),
   ),
 })
+const ServerRequestResolved = Schema.Struct({ requestId: Schema.Union([Schema.Number, Schema.String]) })
+
+const approvalDecisions = ["accept", "acceptForSession", "decline", "cancel"] as const
+const availableApprovalDecisions = (value: ReadonlyArray<unknown> | null | undefined) => {
+  const available = value?.filter(
+    (decision): decision is (typeof approvalDecisions)[number] =>
+      typeof decision === "string" && approvalDecisions.includes(decision as never),
+  )
+  return value === undefined || value === null ? [...approvalDecisions] : (available ?? [])
+}
 
 const decode = <A, E>(
   schema: Schema.Codec<A, E, never, never>,
@@ -151,6 +163,10 @@ export const parseCodexNotification = Effect.fn("CodexAppServer.parseNotificatio
           steps: value.plan,
         } satisfies CodexEvent
       }
+      case "serverRequest/resolved": {
+        const value = yield* decode(ServerRequestResolved, params, method)
+        return { _tag: "ServerRequestResolved", requestId: value.requestId } satisfies CodexEvent
+      }
       case "thread/tokenUsage/updated": {
         const value = yield* decode(TokenUsage, params, method)
         return {
@@ -202,6 +218,7 @@ export const parseCodexServerRequest = Effect.fn("CodexAppServer.parseServerRequ
           requestId: request.id,
           kind: "command",
           prompt: `Allow ${command}${reason}?`,
+          availableDecisions: availableApprovalDecisions(params.availableDecisions),
           params,
         } satisfies CodexEvent
       }
@@ -214,6 +231,7 @@ export const parseCodexServerRequest = Effect.fn("CodexAppServer.parseServerRequ
           requestId: request.id,
           kind: "file-change",
           prompt: `Allow file changes${target}${reason}?`,
+          availableDecisions: [...approvalDecisions],
           params,
         } satisfies CodexEvent
       }
@@ -223,6 +241,7 @@ export const parseCodexServerRequest = Effect.fn("CodexAppServer.parseServerRequ
           _tag: "UserInputRequested",
           requestId: request.id,
           questions: params.questions,
+          autoResolutionMs: params.autoResolutionMs,
         } satisfies CodexEvent
       }
       default:

@@ -82,6 +82,7 @@ describe("Codex app-server events", () => {
           itemId: "item",
           command: "bun test",
           reason: "needs permission",
+          availableDecisions: ["decline", "cancel"],
         },
       }),
     )
@@ -90,6 +91,29 @@ describe("Codex app-server events", () => {
     if (event._tag === "ApprovalRequested") {
       expect(event.prompt).toContain("bun test")
       expect(event.requestId).toBe(4)
+      expect(event.availableDecisions).toEqual(["decline", "cancel"])
     }
+  })
+
+  test("decodes user-input deadlines and externally resolved requests", async () => {
+    const input = await Effect.runPromise(
+      parseCodexServerRequest({
+        id: "question",
+        method: "item/tool/requestUserInput",
+        params: {
+          autoResolutionMs: 250,
+          questions: [],
+        },
+      }),
+    )
+    const resolved = await Effect.runPromise(
+      parseCodexNotification({
+        method: "serverRequest/resolved",
+        params: { threadId: "thread", requestId: "question" },
+      }),
+    )
+
+    expect(input).toMatchObject({ _tag: "UserInputRequested", autoResolutionMs: 250 })
+    expect(resolved).toEqual({ _tag: "ServerRequestResolved", requestId: "question" })
   })
 })

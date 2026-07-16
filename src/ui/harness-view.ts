@@ -39,18 +39,21 @@ interface Callbacks {
   readonly onSettingsChange?: (settings: CodexTurnSettings) => void
   readonly onSteer: (prompt: string) => void
   readonly onInterrupt: () => void
-  readonly onApproval: (requestId: number | string, decision: ApprovalDecision) => void
-  readonly onUserInput: (requestId: number | string, response: ToolRequestUserInputResponse) => void
+  readonly onApproval: (requestId: number | string, decision: ApprovalDecision) => void | Promise<void>
+  readonly onUserInput: (requestId: number | string, response: ToolRequestUserInputResponse) => void | Promise<void>
   readonly onUsage?: () => void
   readonly onQuit: () => void
 }
 
 type PendingInteraction =
-  | { readonly _tag: "Approval"; readonly requestId: number | string }
+  | { readonly _tag: "Approval"; readonly requestId: number | string; readonly availableDecisions: ReadonlyArray<ApprovalDecision>; responding: boolean; expired: boolean }
   | {
       readonly _tag: "UserInput"
       readonly requestId: number | string
       readonly questionIds: ReadonlyArray<string>
+      readonly isSecret: boolean
+      responding: boolean
+      expired: boolean
     }
 
 const shortenPath = (path: string, max = 58): string =>
@@ -171,9 +174,13 @@ export class HarnessView {
   private readonly status: TextRenderable
   private readonly spinner: SpinnerRenderable
   private readonly settingsStatus: TextRenderable
+  private readonly shell: BoxRenderable
+  private readonly headerPath: TextRenderable
+  private readonly statusGroup: BoxRenderable
   private readonly markdownSyntaxStyle: SyntaxStyle
   private readonly onSettingsChange: ((settings: CodexTurnSettings) => void) | undefined
   private readonly onUsage: (() => void) | undefined
+  private readonly onUserInput: Callbacks["onUserInput"]
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
   private busy = false
@@ -183,7 +190,8 @@ export class HarnessView {
   private selectedReasoningEffort: string | null | undefined
   private codexStatus: CodexStatus | undefined
   private pickerOverlay: BoxRenderable | undefined
-  private pendingInteraction: PendingInteraction | undefined
+  private readonly pendingInteractions = new Map<number | string, PendingInteraction>()
+  private planBody: TextRenderable | undefined
   private matchingSlashCommands: ReadonlyArray<SlashCommandSuggestion> = []
   private selectedSlashCommand = 0
   private dismissedSlashCommandValue: string | undefined
@@ -202,11 +210,12 @@ export class HarnessView {
     this.renderer = renderer
     this.onSettingsChange = callbacks.onSettingsChange
     this.onUsage = callbacks.onUsage
+    this.onUserInput = callbacks.onUserInput
     this.selectedModel = initialSettings.model
     this.selectedReasoningEffort = initialSettings.reasoningEffort
     this.markdownSyntaxStyle = createMarkdownSyntaxStyle()
 
-    const shell = new BoxRenderable(renderer, {
+    this.shell = new BoxRenderable(renderer, {
       id: "shell",
       width: "100%",
       height: "100%",
@@ -229,12 +238,11 @@ export class HarnessView {
         selectable: false,
       }),
     )
-    header.add(
-      new TextRenderable(renderer, {
+    this.headerPath = new TextRenderable(renderer, {
         content: t`${fg(theme.subtle)(shortenPath(cwd))}`,
         selectable: false,
-      }),
-    )
+      })
+    header.add(this.headerPath)
 
     const main = new BoxRenderable(renderer, {
       id: "main",
@@ -308,7 +316,7 @@ export class HarnessView {
       alignItems: "center",
       justifyContent: "space-between",
     })
-    const statusGroup = new BoxRenderable(renderer, {
+    this.statusGroup = new BoxRenderable(renderer, {
       width: "50%",
       height: 1,
       flexDirection: "row",
@@ -329,9 +337,9 @@ export class HarnessView {
       content: "",
       selectable: false,
     })
-    statusGroup.add(this.spinner)
-    statusGroup.add(this.status)
-    statusBar.add(statusGroup)
+    this.statusGroup.add(this.spinner)
+    this.statusGroup.add(this.status)
+    statusBar.add(this.statusGroup)
     statusBar.add(this.settingsStatus)
 
     this.slashCommandMenu = new BoxRenderable(renderer, {
@@ -391,12 +399,14 @@ export class HarnessView {
     })
     composer.add(this.input)
 
-    shell.add(header)
-    shell.add(main)
-    shell.add(statusBar)
-    shell.add(this.slashCommandMenu)
-    shell.add(composer)
-    renderer.root.add(shell)
+    this.shell.add(header)
+    this.shell.add(main)
+    this.shell.add(statusBar)
+    this.shell.add(this.slashCommandMenu)
+    this.shell.add(composer)
+    renderer.root.add(this.shell)
+    this.applyResponsiveLayout(renderer.width, renderer.height)
+    renderer.on("resize", (width, height) => this.applyResponsiveLayout(width, height))
 
     this.input.on(InputRenderableEvents.ENTER, (value: string) => {
       if (this.pickerOverlay !== undefined) return
@@ -404,31 +414,40 @@ export class HarnessView {
       if (!prompt) return
       this.input.value = ""
 
-      if (this.pendingInteraction?._tag === "Approval") {
-        const decision = this.parseApproval(prompt)
+      const pendingInteraction = this.activeInteraction()
+      if (pendingInteraction?._tag === "Approval") {
+        const decision = this.parseApproval(prompt, pendingInteraction.availableDecisions)
         if (decision === undefined) {
           this.input.placeholder = "Type y, session, n, or cancel…"
           return
         }
-        const requestId = this.pendingInteraction.requestId
-        this.pendingInteraction = undefined
-        this.input.placeholder = "Steer the active turn…"
+        const requestId = pendingInteraction.requestId
+        pendingInteraction.responding = true
+        this.input.placeholder = "Sending approval…"
+        this.input.blur()
         this.showSpinner()
-        callbacks.onApproval(requestId, decision)
+        void Promise.resolve(callbacks.onApproval(requestId, decision)).then(
+          () => this.resolveInteraction(requestId),
+          () => this.restoreInteraction(requestId),
+        )
         return
       }
 
-      if (this.pendingInteraction?._tag === "UserInput") {
-        const interaction = this.pendingInteraction
+      if (pendingInteraction?._tag === "UserInput") {
+        const interaction = pendingInteraction
         const values = prompt.split("|").map((answer) => answer.trim())
         const answers: Record<string, { readonly answers: ReadonlyArray<string> }> = {}
         interaction.questionIds.forEach((id, index) => {
           answers[id] = { answers: [values[index] ?? values[0] ?? ""] }
         })
-        this.pendingInteraction = undefined
-        this.input.placeholder = "Steer the active turn…"
+        interaction.responding = true
+        this.input.placeholder = "Sending answer…"
+        this.input.blur()
         this.showSpinner()
-        callbacks.onUserInput(interaction.requestId, { answers })
+        void Promise.resolve(callbacks.onUserInput(interaction.requestId, { answers })).then(
+          () => this.resolveInteraction(interaction.requestId),
+          () => this.restoreInteraction(interaction.requestId),
+        )
         return
       }
 
@@ -568,13 +587,14 @@ export class HarnessView {
       case "CommandOutput":
         break
       case "Activity":
-        this.showSpinner()
+        this.showSpinner(event.label)
         break
       case "PlanUpdated": {
         const plan = event.steps
           .map((step) => `${step.status === "completed" ? "✓" : step.status === "inProgress" ? "→" : "·"} ${step.step}`)
           .join("\n")
-        this.addMessage("plan", plan, theme.muted)
+        if (this.planBody === undefined) this.planBody = this.addMessage("plan", plan, theme.muted)
+        else this.planBody.content = plan
         break
       }
       case "TokenUsage":
@@ -586,19 +606,37 @@ export class HarnessView {
         this.updateSettingsStatus()
         break
       case "ApprovalRequested":
-        this.pendingInteraction = { _tag: "Approval", requestId: event.requestId }
+        this.welcome.visible = false
+        this.transcript.visible = true
+        this.pendingInteractions.set(event.requestId, {
+          _tag: "Approval",
+          requestId: event.requestId,
+          availableDecisions: event.availableDecisions,
+          responding: false,
+          expired: false,
+        })
         this.hideSlashCommandMenu()
         this.addMessage("approval", event.prompt, theme.accent)
         this.setStatus(t`${fg(theme.accent)("● approval needed")}`)
-        this.input.placeholder = "Type y, session, n, or cancel…"
-        this.input.focus()
+        if (event.availableDecisions.length === 0) {
+          const interaction = this.pendingInteractions.get(event.requestId)
+          if (interaction !== undefined) interaction.expired = true
+          this.addMessage("approval", "No supported approval decision is available in this client.", theme.error)
+        }
+        this.activateNextInteraction()
         break
       case "UserInputRequested": {
-        this.pendingInteraction = {
+        this.welcome.visible = false
+        this.transcript.visible = true
+        const interaction: PendingInteraction = {
           _tag: "UserInput",
           requestId: event.requestId,
           questionIds: event.questions.map((question) => question.id),
+          isSecret: event.questions.some((question) => question.isSecret),
+          responding: false,
+          expired: false,
         }
+        this.pendingInteractions.set(event.requestId, interaction)
         this.hideSlashCommandMenu()
         const content = event.questions
           .map((question) => {
@@ -608,15 +646,34 @@ export class HarnessView {
           .join("\n\n")
         this.addMessage("codex · question", content, theme.accent)
         this.setStatus(t`${fg(theme.accent)("● input needed")}`)
-        this.input.placeholder =
-          event.questions.length > 1 ? "Answer each question separated by | …" : "Type your answer…"
-        this.input.focus()
+        if (interaction.isSecret) {
+          this.addMessage(
+            "security",
+            "Secret input is unsupported by this terminal control. The request was rejected without collecting or displaying a secret.",
+            theme.error,
+          )
+          interaction.responding = true
+          const answers = Object.fromEntries(
+            interaction.questionIds.map((id) => [id, { answers: [] }]),
+          )
+          void Promise.resolve(this.onUserInput(interaction.requestId, { answers })).then(
+            () => this.resolveInteraction(interaction.requestId),
+            () => this.restoreInteraction(interaction.requestId),
+          )
+        } else this.activateNextInteraction()
+        if (event.autoResolutionMs !== null) {
+          this.scheduleAutoResolution(event.requestId, event.autoResolutionMs)
+        }
         break
       }
+      case "ServerRequestResolved":
+        this.resolveInteraction(event.requestId)
+        break
       case "TurnFailed":
         this.setStatus(t`${fg(theme.error)("●")} ${fg(theme.error)(event.message)}`)
         break
       case "TurnCompleted":
+        this.finalizeStreamingMarkdown()
       case "Unknown":
         break
     }
@@ -624,7 +681,7 @@ export class HarnessView {
 
   complete(): void {
     this.busy = false
-    this.pendingInteraction = undefined
+    this.finalizeStreamingMarkdown()
     this.setStatus(t`${fg(theme.accent)("● ready")}`)
     this.input.placeholder = "Continue the session, or type /help…"
     this.input.focus()
@@ -632,7 +689,7 @@ export class HarnessView {
 
   interrupted(): void {
     this.busy = false
-    this.pendingInteraction = undefined
+    this.finalizeStreamingMarkdown()
     this.setStatus(t`${fg(theme.muted)("○ interrupted")}`)
     this.input.placeholder = "Continue the session, or type /help…"
     this.input.focus()
@@ -720,7 +777,7 @@ export class HarnessView {
   private updateSlashCommandMenu(value: string): void {
     if (
       this.busy ||
-      this.pendingInteraction !== undefined ||
+      this.activeInteraction() !== undefined ||
       this.pickerOverlay !== undefined ||
       value === this.dismissedSlashCommandValue
     ) {
@@ -796,7 +853,8 @@ export class HarnessView {
   private clearSession(): void {
     this.sessionId = undefined
     this.latestTokenUsage = undefined
-    this.pendingInteraction = undefined
+    this.pendingInteractions.clear()
+    this.planBody = undefined
     this.streamingMessages.clear()
     for (const child of this.transcript.getChildren()) {
       this.transcript.remove(child)
@@ -1112,8 +1170,8 @@ export class HarnessView {
     this.showCommandMessage("usage", message, true)
   }
 
-  private showSpinner(): void {
-    this.status.content = ""
+  private showSpinner(label?: string): void {
+    this.status.content = label === undefined ? "" : t`${fg(theme.muted)(` ${label}`)}`
     this.spinner.visible = true
   }
 
@@ -1130,24 +1188,106 @@ export class HarnessView {
     this.input.focus()
   }
 
-  private parseApproval(value: string): ApprovalDecision | undefined {
+  private parseApproval(
+    value: string,
+    availableDecisions: ReadonlyArray<ApprovalDecision>,
+  ): ApprovalDecision | undefined {
+    let decision: ApprovalDecision | undefined
     switch (value.toLowerCase()) {
       case "y":
       case "yes":
       case "accept":
-        return "accept"
+        decision = "accept"
+        break
       case "session":
       case "always":
-        return "acceptForSession"
+        decision = "acceptForSession"
+        break
       case "n":
       case "no":
       case "decline":
-        return "decline"
+        decision = "decline"
+        break
       case "cancel":
-        return "cancel"
+        decision = "cancel"
+        break
       default:
         return undefined
     }
+    return availableDecisions.includes(decision) ? decision : undefined
+  }
+
+  private activeInteraction(): PendingInteraction | undefined {
+    return [...this.pendingInteractions.values()].find(
+      (interaction) =>
+        !interaction.responding &&
+        !interaction.expired &&
+        (interaction._tag === "Approval" || !interaction.isSecret),
+    )
+  }
+
+  private applyResponsiveLayout(width: number, height: number): void {
+    const narrow = width < 60
+    const tiny = width < 40 || height < 14
+    this.shell.paddingX = narrow ? 1 : 3
+    this.shell.paddingY = tiny ? 0 : 1
+    this.headerPath.visible = !narrow
+    this.settingsStatus.visible = width >= 70
+    this.statusGroup.width = width < 70 ? "100%" : "50%"
+    this.welcome.width = narrow ? "100%" : 72
+    this.welcome.paddingX = narrow ? 1 : 3
+    this.welcome.paddingY = height < 18 ? 1 : 2
+    this.welcome.gap = height < 18 ? 0 : 1
+    if (!this.busy && this.sessionId === undefined) this.welcome.visible = !tiny
+  }
+
+  private activateNextInteraction(): void {
+    const interaction = this.activeInteraction()
+    if (interaction === undefined) {
+      this.input.placeholder = this.busy ? "Steer the active turn…" : "Ask Codex, or type /help…"
+      this.input.focus()
+      return
+    }
+    if (interaction._tag === "Approval") {
+      const labels = interaction.availableDecisions.map((decision) =>
+        decision === "acceptForSession" ? "session" : decision,
+      )
+      this.input.placeholder = `Type ${labels.join(", ")}…`
+    } else {
+      this.input.placeholder =
+        interaction.questionIds.length > 1
+          ? "Answer each question separated by | …"
+          : "Type your answer…"
+    }
+    this.input.focus()
+  }
+
+  private resolveInteraction(requestId: number | string): void {
+    this.pendingInteractions.delete(requestId)
+    this.activateNextInteraction()
+  }
+
+  private restoreInteraction(requestId: number | string): void {
+    const interaction = this.pendingInteractions.get(requestId)
+    if (interaction === undefined) return
+    interaction.responding = false
+    this.addMessage("error", "Could not send the response. The request is still pending.", theme.error)
+    this.activateNextInteraction()
+  }
+
+  private scheduleAutoResolution(requestId: number | string, delay: number): void {
+    setTimeout(() => {
+      const interaction = this.pendingInteractions.get(requestId)
+      if (interaction === undefined || interaction.responding) return
+      interaction.expired = true
+      this.addMessage("codex · question", "This request reached its automatic-resolution deadline.", theme.muted)
+      this.activateNextInteraction()
+    }, Math.max(0, delay))
+  }
+
+  private finalizeStreamingMarkdown(): void {
+    for (const message of this.streamingMessages.values()) message.renderable.streaming = false
+    this.streamingMessages.clear()
   }
 
   private addMessage(label: string, content: string, color: string): TextRenderable {

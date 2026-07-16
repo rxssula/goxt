@@ -85,13 +85,16 @@ export type CodexEvent =
       readonly requestId: number | string
       readonly kind: "command" | "file-change"
       readonly prompt: string
+      readonly availableDecisions: ReadonlyArray<ApprovalDecision>
       readonly params: CommandExecutionRequestApprovalParams | FileChangeRequestApprovalParams
     }
   | {
       readonly _tag: "UserInputRequested"
       readonly requestId: number | string
       readonly questions: ReadonlyArray<ToolRequestUserInputQuestion>
+      readonly autoResolutionMs: number | null
     }
+  | { readonly _tag: "ServerRequestResolved"; readonly requestId: number | string }
   | { readonly _tag: "TurnCompleted"; readonly turnId: string; readonly status: string }
   | { readonly _tag: "TurnFailed"; readonly message: string }
   | { readonly _tag: "Unknown"; readonly method: string; readonly params: unknown }

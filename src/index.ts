@@ -49,7 +49,7 @@ const runAction = (effect: Effect.Effect<void, { readonly message: string }, Cod
     })
 
 const respondApproval = (requestId: number | string, decision: ApprovalDecision) =>
-  runAction(
+  runWithCodex(
     Effect.gen(function* () {
       const codex = yield* CodexAppServer.Service
       yield* codex.respondApproval(requestId, decision)
@@ -57,7 +57,7 @@ const respondApproval = (requestId: number | string, decision: ApprovalDecision)
   )
 
 const respondUserInput = (requestId: number | string, response: ToolRequestUserInputResponse) =>
-  runAction(
+  runWithCodex(
     Effect.gen(function* () {
       const codex = yield* CodexAppServer.Service
       yield* codex.respondUserInput(requestId, response)
