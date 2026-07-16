@@ -282,6 +282,7 @@ export class HarnessView {
   private selectedReasoningEffort: string | null | undefined
   private codexStatus: CodexStatus | undefined
   private pickerOverlay: BoxRenderable | undefined
+  private pickerSelect: SelectRenderable | undefined
   private readonly pendingInteractions = new Map<number | string, PendingInteraction>()
   private readonly interactionTimers = new Map<number | string, ReturnType<typeof setTimeout>>()
   private planBody: TextRenderable | undefined
@@ -645,6 +646,14 @@ export class HarnessView {
       if (key.name === "escape" && this.pickerOverlay !== undefined) {
         this.closePicker()
         return
+      }
+      if (this.pickerSelect !== undefined && !key.ctrl && !key.meta && !key.super) {
+        if (key.name === "j" || key.name === "k") {
+          if (key.name === "j") this.pickerSelect.moveDown()
+          else this.pickerSelect.moveUp()
+          key.preventDefault()
+          return
+        }
       }
       if (key.super && key.name === "l") {
         this.input.focus()
@@ -1449,7 +1458,7 @@ export class HarnessView {
     dialog.add(select)
     dialog.add(
       new TextRenderable(this.renderer, {
-        content: "↑↓ navigate   Enter select   Esc cancel",
+        content: "↑↓/jk navigate   Enter select   Esc cancel",
         fg: theme.subtle,
         height: 1,
         selectable: false,
@@ -1458,6 +1467,7 @@ export class HarnessView {
     overlay.add(dialog)
     this.renderer.root.add(overlay)
     this.pickerOverlay = overlay
+    this.pickerSelect = select
     this.input.blur()
     select.focus()
   }
@@ -1466,6 +1476,7 @@ export class HarnessView {
     const overlay = this.pickerOverlay
     if (overlay === undefined) return
     this.pickerOverlay = undefined
+    this.pickerSelect = undefined
     overlay.parent?.remove(overlay)
     overlay.destroyRecursively()
     if (focusInput) this.input.focus()

@@ -5,7 +5,12 @@ import {
   type TestRendererSetup,
 } from "@opentui/core/testing"
 import { HarnessView } from "../src/ui/harness-view.js"
-import type { ApprovalDecision, CodexModel, CodexTurnSettings } from "../src/codex/types.js"
+import type {
+  ApprovalDecision,
+  CodexModel,
+  CodexSession,
+  CodexTurnSettings,
+} from "../src/codex/types.js"
 
 let testRenderer: TestRendererSetup | undefined
 
@@ -327,7 +332,7 @@ describe("HarnessView", () => {
     expect(frame).toContain("Choose model")
     expect(frame).toContain("GPT Default  gpt-default")
     expect(frame).toContain("GPT Deep  gpt-deep")
-    expect(frame).toContain("↑↓ navigate   Enter select   Esc cancel")
+    expect(frame).toContain("↑↓/jk navigate   Enter select   Esc cancel")
   })
 
   test("applies picker selections to the next turn", async () => {
@@ -360,6 +365,29 @@ describe("HarnessView", () => {
         settings: { model: "gpt-deep", reasoningEffort: "high" },
       },
     ])
+  })
+
+  test("navigates the sessions picker with j and k", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30, kittyKeyboard: true })
+    const { renderer } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const selectedSessions: string[] = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onSessionSelect: (sessionId) => selectedSessions.push(sessionId),
+    })
+    const sessions: ReadonlyArray<CodexSession> = [
+      { id: "session-one", title: "One", cwd: "/workspace/goxt", updatedAt: 1, status: "idle" },
+      { id: "session-two", title: "Two", cwd: "/workspace/goxt", updatedAt: 2, status: "idle" },
+    ]
+
+    view.setSessions(sessions)
+    keys.pressKey("j")
+    keys.pressKey("k")
+    keys.pressKey("j")
+    keys.pressEnter()
+
+    expect(selectedSessions).toEqual(["session-two"])
   })
 
   test("restores saved settings and reports later changes", async () => {
