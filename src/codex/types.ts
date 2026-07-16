@@ -16,6 +16,7 @@ export interface CodexStatus extends Schema.Schema.Type<typeof CodexStatus> {}
 export const CodexRunRequest = Schema.Struct({
   prompt: Schema.String,
   cwd: Schema.String,
+  images: Schema.optionalKey(Schema.Array(Schema.String)),
   sessionId: Schema.optionalKey(Schema.String),
   model: Schema.optionalKey(Schema.NullOr(Schema.String)),
   reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -26,6 +27,11 @@ export interface CodexRunRequest extends Schema.Schema.Type<typeof CodexRunReque
 export interface CodexTurnSettings {
   readonly model?: string | null
   readonly reasoningEffort?: string | null
+}
+
+export interface CodexImageInput {
+  readonly path: string
+  readonly label: string
 }
 
 export type CodexSessionStatus = "notLoaded" | "idle" | "active" | "waiting" | "systemError"

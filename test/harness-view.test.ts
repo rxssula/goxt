@@ -110,6 +110,34 @@ describe("HarnessView", () => {
     expect(view.input.height).toBe(1)
   })
 
+  test("turns pasted image bytes into a cursor token and submits the image", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24, kittyKeyboard: true })
+    const { renderer } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const submissions: Array<{ prompt: string; paths: ReadonlyArray<string> }> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onSubmit: (prompt, _settings, images) => {
+        submissions.push({ prompt, paths: images.map((image) => image.path) })
+      },
+    })
+
+    // A complete 1×1 transparent PNG.
+    const png = Uint8Array.from(Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XwX9WQAAAABJRU5ErkJggg==",
+      "base64",
+    ))
+    renderer.keyInput.processPaste(png, { kind: "binary", mimeType: "image/png" })
+    await Bun.sleep(25)
+
+    expect(view.input.value).toBe("[Image #1]")
+    keys.pressEnter()
+    expect(submissions).toHaveLength(1)
+    expect(submissions[0]?.prompt).toBe("[Image #1]")
+    expect(submissions[0]?.paths[0]).toEndWith(".png")
+    expect(await Bun.file(submissions[0]!.paths[0]!).exists()).toBe(true)
+  })
+
   test("switches between composer and j/k transcript navigation", async () => {
     testRenderer = await createTestRenderer({ width: 80, height: 16, kittyKeyboard: true })
     const { renderer } = testRenderer
