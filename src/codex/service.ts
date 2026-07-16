@@ -24,7 +24,7 @@ export interface Interface {
   readonly run: (
     request: CodexRunRequest,
     onEvent: (event: CodexEvent) => void,
-  ) => Effect.Effect<void, CodexRunError>
+  ) => Effect.Effect<string, CodexRunError>
   readonly steer: (prompt: string) => Effect.Effect<void, CodexRunError>
   readonly interrupt: () => Effect.Effect<void, CodexRunError>
   readonly respondApproval: (
@@ -40,7 +40,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@goxt/CodexAppServer") {}
 
 interface ActiveRun {
-  readonly completion: Deferred.Deferred<void, CodexRunError>
+  readonly completion: Deferred.Deferred<string, CodexRunError>
   readonly onEvent: (event: CodexEvent) => void
   readonly threadId?: string
   readonly turnId?: string
@@ -206,8 +206,11 @@ export const layer = Layer.effect(
 
         const active = yield* Ref.get(activeRun)
         if (active === undefined) return
-        if (event._tag === "TurnCompleted") {
-          yield* Deferred.succeed(active.completion, undefined)
+        if (
+          event._tag === "TurnCompleted" &&
+          (active.turnId === undefined || active.turnId === event.turnId)
+        ) {
+          yield* Deferred.succeed(active.completion, event.status)
         } else if (event._tag === "TurnFailed") {
           yield* Deferred.fail(
             active.completion,
@@ -351,7 +354,7 @@ export const layer = Layer.effect(
         )
       }
 
-      const completion = yield* Deferred.make<void, CodexRunError>()
+      const completion = yield* Deferred.make<string, CodexRunError>()
       yield* Ref.set(activeRun, { completion, onEvent })
 
       const classifyRpcError = (
@@ -378,7 +381,10 @@ export const layer = Layer.effect(
         yield* Ref.update(activeRun, (active) =>
           active === undefined ? undefined : { ...active, threadId, turnId: decoded.turn.id },
         )
-        yield* Effect.race(Deferred.await(completion), protocol.closed)
+        return yield* Effect.raceFirst(
+          Deferred.await(completion),
+          protocol.closed.pipe(Effect.andThen(Effect.never)),
+        )
       }).pipe(
         Effect.catchTag("CodexRpcError", classifyRpcError),
         Effect.ensuring(
@@ -388,7 +394,7 @@ export const layer = Layer.effect(
         ),
       )
 
-      yield* workflow
+      return yield* workflow
     })
 
     const steer = Effect.fn("CodexAppServer.steer")(function* (prompt: string) {
@@ -409,10 +415,19 @@ export const layer = Layer.effect(
     const interrupt = Effect.fn("CodexAppServer.interrupt")(function* () {
       const active = yield* Ref.get(activeRun)
       if (active?.threadId === undefined || active.turnId === undefined) return
-      yield* protocol.request("turn/interrupt", {
-        threadId: active.threadId,
-        turnId: active.turnId,
-      })
+      yield* Effect.raceFirst(
+        protocol.request("turn/interrupt", {
+          threadId: active.threadId,
+          turnId: active.turnId,
+        }),
+        Effect.sleep("5 seconds").pipe(
+          Effect.andThen(
+            Effect.fail(
+              new CodexProtocolError({ message: "Codex did not acknowledge the interrupt." }),
+            ),
+          ),
+        ),
+      )
     })
 
     const respondApproval = Effect.fn("CodexAppServer.respondApproval")(function* (

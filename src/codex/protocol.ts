@@ -1,4 +1,4 @@
-import { Deferred, Effect, Queue, Ref, Stream } from "effect"
+import { Deferred, Effect, Queue, Ref, Semaphore, Stream } from "effect"
 import type { RpcNotification, RpcServerRequest } from "./generated/protocol.js"
 import { CodexProtocolError, CodexRpcError } from "./types.js"
 
@@ -113,6 +113,7 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
   const notifications = yield* Queue.unbounded<RpcNotification>()
   const serverRequests = yield* Queue.unbounded<RpcServerRequest>()
   const closed = yield* Deferred.make<void, CodexProtocolError>()
+  const writeLock = yield* Semaphore.make(1)
   const stderrPromise = new Response(process.stderr).text()
 
   const removePending = Effect.fn("CodexProtocol.removePending")(function* (id: number | string) {
@@ -141,7 +142,7 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
   })
 
   const write = Effect.fn("CodexProtocol.write")(function* (message: unknown) {
-    yield* Effect.tryPromise({
+    yield* writeLock.withPermit(Effect.tryPromise({
       try: async () => {
         await process.stdin.write(`${JSON.stringify(message)}\n`)
         await process.stdin.flush()
@@ -150,7 +151,7 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
         new CodexProtocolError({
           message: "Could not write to the Codex app-server process.",
         }),
-    })
+    }))
   })
 
   const route = Effect.fn("CodexProtocol.route")(function* (message: RpcMessage) {
@@ -183,7 +184,13 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
   ).pipe(
     Stream.mapEffect(parseRpcMessage),
     Stream.runForEach(route),
-    Effect.catch(closeWith),
+    Effect.matchEffect({
+      onFailure: closeWith,
+      onSuccess: () =>
+        closeWith(
+          new CodexProtocolError({ message: "Codex app-server closed its output stream." }),
+        ),
+    }),
     Effect.forkScoped({ startImmediately: true }),
   )
 
@@ -212,10 +219,13 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
     const deferred = yield* Deferred.make<unknown, RpcFailure>()
     yield* Ref.update(pending, (requests) => new Map(requests).set(id, deferred))
 
-    const awaitResponse = Effect.gen(function* () {
-      yield* write({ id, method, params })
-      return yield* Deferred.await(deferred)
-    }).pipe(Effect.ensuring(removePending(id)))
+    const awaitResponse = Effect.raceFirst(
+      Effect.gen(function* () {
+        yield* write({ id, method, params })
+        return yield* Deferred.await(deferred)
+      }),
+      Deferred.await(closed),
+    ).pipe(Effect.ensuring(removePending(id)))
 
     return yield* awaitResponse
   })

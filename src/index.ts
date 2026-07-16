@@ -17,6 +17,7 @@ const renderer = await createCliRenderer({
   openConsoleOnError: false,
   targetFps: 30,
   backgroundColor: theme.background,
+  exitSignals: [],
 })
 
 const runtime = ManagedRuntime.make(CodexAppServer.layer)
@@ -25,7 +26,7 @@ const runWithCodex = <A, E>(effect: Effect.Effect<A, E, CodexAppServer.Service>)
   runtime.runPromise(effect)
 
 interface ActiveTurn {
-  interrupted: boolean
+  interruptInFlight: boolean
 }
 
 let activeTurn: ActiveTurn | undefined
@@ -67,14 +68,14 @@ const view = new HarnessView(renderer, cwd, {
   onSubmit: (prompt, settings) => {
     if (activeTurn !== undefined) return
 
-    const turn: ActiveTurn = { interrupted: false }
+    const turn: ActiveTurn = { interruptInFlight: false }
     activeTurn = turn
     view.begin(prompt)
 
     const run = Effect.gen(function* () {
       const codex = yield* CodexAppServer.Service
       const sessionId = view.currentSessionId
-      yield* codex.run(
+      return yield* codex.run(
         sessionId === undefined
           ? { prompt, cwd, ...settings }
           : { prompt, cwd, sessionId, ...settings },
@@ -83,7 +84,7 @@ const view = new HarnessView(renderer, cwd, {
     }).pipe(
       Effect.match({
         onFailure: (error) => ({ ok: false as const, message: error.message }),
-        onSuccess: () => ({ ok: true as const }),
+        onSuccess: (status) => ({ ok: true as const, status }),
       }),
     )
 
@@ -91,7 +92,7 @@ const view = new HarnessView(renderer, cwd, {
       .then((result) => {
         if (quitting) return
         if (result.ok) {
-          if (turn.interrupted) view.interrupted()
+          if (result.status === "interrupted") view.interrupted()
           else view.complete()
         } else view.fail(result.message)
       })
@@ -115,15 +116,19 @@ const view = new HarnessView(renderer, cwd, {
   },
   onInterrupt: () => {
     const turn = activeTurn
-    if (turn === undefined || turn.interrupted) return
-    turn.interrupted = true
+    if (turn === undefined || turn.interruptInFlight) return
+    turn.interruptInFlight = true
     view.interrupting()
-    runAction(
-      Effect.gen(function* () {
-        const codex = yield* CodexAppServer.Service
-        yield* codex.interrupt()
-      }),
-    )
+    const interrupt = Effect.gen(function* () {
+      const codex = yield* CodexAppServer.Service
+      yield* codex.interrupt()
+    })
+    void runWithCodex(interrupt).catch((error: unknown) => {
+      turn.interruptInFlight = false
+      if (!quitting && activeTurn === turn) {
+        view.actionFailed(error instanceof Error ? error.message : "Could not interrupt the turn.")
+      }
+    })
   },
   onApproval: respondApproval,
   onUserInput: respondUserInput,
@@ -140,11 +145,26 @@ const view = new HarnessView(renderer, cwd, {
       })
   },
   onQuit: () => {
-    quitting = true
-    view.destroy()
-    void runtime.dispose()
+    void shutdown()
   },
 }, initialSettings)
+
+let shutdownPromise: Promise<void> | undefined
+const shutdown = (): Promise<void> => {
+  if (shutdownPromise !== undefined) return shutdownPromise
+  quitting = true
+  view.destroy()
+  shutdownPromise = runtime.dispose().catch(() => {
+    // Shutdown is best-effort after the terminal has been restored.
+  })
+  return shutdownPromise
+}
+
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.once(signal, () => {
+    void shutdown()
+  })
+}
 
 const loadStatus = Effect.gen(function* () {
   const codex = yield* CodexAppServer.Service
