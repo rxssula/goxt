@@ -135,23 +135,33 @@ export const make = Effect.fn("CodexProtocol.make")(function* (
   })
 
   const closeWith = Effect.fn("CodexProtocol.closeWith")(function* (error: CodexProtocolError) {
-    yield* failPending(error)
-    yield* Deferred.fail(closed, error)
-    yield* Queue.shutdown(notifications)
-    yield* Queue.shutdown(serverRequests)
+    yield* writeLock.withPermit(
+      Effect.gen(function* () {
+        if (yield* Deferred.isDone(closed)) return
+        yield* failPending(error)
+        yield* Deferred.fail(closed, error)
+        yield* Queue.shutdown(notifications)
+        yield* Queue.shutdown(serverRequests)
+      }),
+    )
   })
 
   const write = Effect.fn("CodexProtocol.write")(function* (message: unknown) {
-    yield* writeLock.withPermit(Effect.tryPromise({
-      try: async () => {
-        await process.stdin.write(`${JSON.stringify(message)}\n`)
-        await process.stdin.flush()
-      },
-      catch: () =>
-        new CodexProtocolError({
-          message: "Could not write to the Codex app-server process.",
-        }),
-    }))
+    yield* writeLock.withPermit(
+      Effect.gen(function* () {
+        if (yield* Deferred.isDone(closed)) yield* Deferred.await(closed)
+        yield* Effect.tryPromise({
+          try: async () => {
+            await process.stdin.write(`${JSON.stringify(message)}\n`)
+            await process.stdin.flush()
+          },
+          catch: () =>
+            new CodexProtocolError({
+              message: "Could not write to the Codex app-server process.",
+            }),
+        })
+      }),
+    )
   })
 
   const route = Effect.fn("CodexProtocol.route")(function* (message: RpcMessage) {

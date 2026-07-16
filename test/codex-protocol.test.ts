@@ -60,4 +60,41 @@ describe("Codex JSON-RPC protocol", () => {
 
     expect(Exit.isFailure(exit)).toBe(true)
   })
+
+  test("does not write a request after the protocol closes", async () => {
+    const writes: Array<string> = []
+    const process = {
+      stdin: {
+        write: async (message: string) => {
+          writes.push(message)
+          throw new Error("stdin is closed")
+        },
+        flush: async () => {},
+      },
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(1),
+    } as unknown as Bun.Subprocess<"pipe", "pipe", "pipe">
+
+    const requestExit = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const protocol = yield* make(process)
+          yield* Effect.exit(protocol.closed)
+          return yield* Effect.exit(protocol.request("after/close", {}))
+        }),
+      ),
+    )
+
+    expect(Exit.isFailure(requestExit)).toBe(true)
+    expect(writes).toEqual([])
+  })
 })
