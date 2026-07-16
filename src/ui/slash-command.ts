@@ -4,6 +4,7 @@ export type SlashCommand =
   | { readonly _tag: "Reasoning"; readonly value?: string }
   | { readonly _tag: "Help" }
   | { readonly _tag: "Usage" }
+  | { readonly _tag: "Sessions" }
   | { readonly _tag: "Unknown"; readonly name: string }
 
 export interface SlashCommandSuggestion {
@@ -17,6 +18,7 @@ export const slashCommandSuggestions: ReadonlyArray<SlashCommandSuggestion> = [
   { name: "reasoning", description: "Choose the reasoning effort" },
   { name: "clear", description: "Start a new session and clear the screen" },
   { name: "usage", description: "Show account limits and context usage" },
+  { name: "sessions", description: "Switch between Codex sessions" },
 ]
 
 export const suggestSlashCommands = (input: string): ReadonlyArray<SlashCommandSuggestion> => {
@@ -44,6 +46,8 @@ export const parseSlashCommand = (input: string): SlashCommand | undefined => {
       return { _tag: "Help" }
     case "usage":
       return { _tag: "Usage" }
+    case "sessions":
+      return { _tag: "Sessions" }
     default:
       return { _tag: "Unknown", name: name || "/" }
   }

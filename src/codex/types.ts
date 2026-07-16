@@ -28,6 +28,26 @@ export interface CodexTurnSettings {
   readonly reasoningEffort?: string | null
 }
 
+export type CodexSessionStatus = "notLoaded" | "idle" | "active" | "waiting" | "systemError"
+
+export interface CodexSession {
+  readonly id: string
+  readonly title: string
+  readonly cwd: string
+  readonly updatedAt: number
+  readonly status: CodexSessionStatus
+}
+
+export interface CodexSessionMessage {
+  readonly role: "user" | "assistant"
+  readonly text: string
+}
+
+export interface CodexSessionHistory {
+  readonly session: CodexSession
+  readonly messages: ReadonlyArray<CodexSessionMessage>
+}
+
 export interface CodexModel {
   readonly id: string
   readonly model: string

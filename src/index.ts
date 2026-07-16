@@ -27,6 +27,7 @@ const runWithCodex = <A, E>(effect: Effect.Effect<A, E, CodexAppServer.Service>)
 
 interface ActiveTurn {
   interruptInFlight: boolean
+  sessionId?: string
 }
 
 let activeTurn: ActiveTurn | undefined
@@ -68,7 +69,10 @@ const view = new HarnessView(renderer, cwd, {
   onSubmit: (prompt, settings) => {
     if (activeTurn !== undefined) return
 
-    const turn: ActiveTurn = { interruptInFlight: false }
+    const turn: ActiveTurn = {
+      interruptInFlight: false,
+      ...(view.currentSessionId === undefined ? {} : { sessionId: view.currentSessionId }),
+    }
     activeTurn = turn
     view.begin(prompt)
 
@@ -79,7 +83,10 @@ const view = new HarnessView(renderer, cwd, {
         sessionId === undefined
           ? { prompt, cwd, ...settings }
           : { prompt, cwd, sessionId, ...settings },
-        (event) => view.handleEvent(event),
+        (event) => {
+          if (event._tag === "ThreadStarted") turn.sessionId = event.threadId
+          if (turn.sessionId === view.currentSessionId) view.handleEvent(event)
+        },
       )
     }).pipe(
       Effect.match({
@@ -92,6 +99,7 @@ const view = new HarnessView(renderer, cwd, {
       .then((result) => {
         if (activeTurn === turn) activeTurn = undefined
         if (quitting) return
+        if (turn.sessionId !== view.currentSessionId) return
         if (result.ok) {
           if (result.status === "interrupted") view.interrupted()
           else view.complete()
@@ -141,6 +149,28 @@ const view = new HarnessView(renderer, cwd, {
       .catch((error: unknown) => {
         if (quitting) return
         view.usageFailed(error instanceof Error ? error.message : "Could not read current usage.")
+      })
+  },
+  onSessions: () => {
+    const loadSessions = Effect.gen(function* () {
+      const codex = yield* CodexAppServer.Service
+      return yield* codex.listSessions(cwd)
+    })
+    void runWithCodex(loadSessions)
+      .then((sessions) => view.setSessions(sessions))
+      .catch((error: unknown) => {
+        view.actionFailed(error instanceof Error ? error.message : "Could not list Codex sessions.")
+      })
+  },
+  onSessionSelect: (sessionId) => {
+    const loadHistory = Effect.gen(function* () {
+      const codex = yield* CodexAppServer.Service
+      return yield* codex.readSessionHistory(sessionId)
+    })
+    void runWithCodex(loadHistory)
+      .then((history) => view.showSessionHistory(history))
+      .catch((error: unknown) => {
+        view.actionFailed(error instanceof Error ? error.message : "Could not load session history.")
       })
   },
   onQuit: () => {

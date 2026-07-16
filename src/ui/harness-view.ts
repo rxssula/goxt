@@ -23,6 +23,8 @@ import {
   type CodexEvent,
   type CodexModel,
   type CodexRateLimits,
+  type CodexSession,
+  type CodexSessionHistory,
   type CodexStatus,
   type CodexTurnSettings,
 } from "../codex/types.js"
@@ -49,6 +51,8 @@ interface Callbacks {
     response: ToolRequestUserInputResponse,
   ) => void | Promise<void>
   readonly onUsage?: () => void
+  readonly onSessions?: () => void
+  readonly onSessionSelect?: (sessionId: string) => void
   readonly onQuit: () => void
 }
 
@@ -201,6 +205,9 @@ export class HarnessView {
   private readonly markdownSyntaxStyle: SyntaxStyle
   private readonly onSettingsChange: ((settings: CodexTurnSettings) => void) | undefined
   private readonly onUsage: (() => void) | undefined
+  private readonly onSessions: (() => void) | undefined
+  private readonly onSessionSelect: ((sessionId: string) => void) | undefined
+  private sessions: ReadonlyArray<CodexSession> = []
   private readonly onUserInput: Callbacks["onUserInput"]
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
@@ -235,6 +242,8 @@ export class HarnessView {
     this.renderer = renderer
     this.onSettingsChange = callbacks.onSettingsChange
     this.onUsage = callbacks.onUsage
+    this.onSessions = callbacks.onSessions
+    this.onSessionSelect = callbacks.onSessionSelect
     this.onUserInput = callbacks.onUserInput
     this.selectedModel = initialSettings.model
     this.selectedReasoningEffort = initialSettings.reasoningEffort
@@ -504,9 +513,34 @@ export class HarnessView {
         callbacks.onQuit()
         return
       }
+      if (key.ctrl && key.name === "p") {
+        this.openSessionPicker()
+        key.preventDefault()
+        return
+      }
       if (key.name === "escape" && this.pickerOverlay !== undefined) {
         this.closePicker()
         return
+      }
+      if (key.super && key.name === "l") {
+        this.input.focus()
+        this.transcript.scrollTo(Number.MAX_SAFE_INTEGER)
+        key.preventDefault()
+        return
+      }
+      if (key.name === "escape" && this.input.focused) {
+        this.dismissedSlashCommandValue = this.input.value
+        this.hideSlashCommandMenu()
+        this.input.blur()
+        key.preventDefault()
+        return
+      }
+      if (!this.input.focused && !key.ctrl && !key.meta && !key.super) {
+        if (key.name === "j" || key.name === "k") {
+          this.transcript.scrollBy(key.name === "j" ? 3 : -3)
+          key.preventDefault()
+          return
+        }
       }
       if (this.handleSlashCommandCompletionKey(key)) return
       if (key.name === "escape" && this.busy) callbacks.onInterrupt()
@@ -567,6 +601,35 @@ export class HarnessView {
 
     if (settingsChanged) this.persistSettings()
     this.updateSettingsStatus()
+  }
+
+  setSessions(sessions: ReadonlyArray<CodexSession>): void {
+    this.sessions = sessions
+    if (sessions.length === 0) {
+      this.showCommandMessage("sessions", "No Codex sessions were found for this workspace.")
+      return
+    }
+    this.openSessionPicker()
+  }
+
+  showSessionHistory(history: CodexSessionHistory): void {
+    this.clearSession()
+    this.sessionId = history.session.id
+    this.welcome.visible = history.messages.length === 0
+    this.transcript.visible = history.messages.length > 0
+    for (const message of history.messages) {
+      if (message.role === "user") this.addMessage("you", message.text, theme.user)
+      else this.addMarkdownMessage("codex", message.text, theme.accent).streaming = false
+    }
+    this.setStatus(t`${fg(history.session.status === "systemError" ? theme.error : theme.accent)(
+      history.session.status === "active" ? "● running" :
+      history.session.status === "waiting" ? "◆ input needed" :
+      history.session.status === "systemError" ? "× error" : "● ready",
+    )}`)
+    this.input.placeholder = history.session.status === "active" || history.session.status === "waiting"
+      ? "This session is running in the background…"
+      : "Continue this session, or type /help…"
+    this.input.focus()
   }
 
   begin(prompt: string): void {
@@ -853,7 +916,7 @@ export class HarnessView {
   }
 
   private handleSlashCommand(command: SlashCommand): void {
-    if (this.busy) {
+    if (this.busy && command._tag !== "Sessions") {
       this.showCommandMessage("command", "Slash commands can only run between turns.", true)
       return
     }
@@ -865,12 +928,15 @@ export class HarnessView {
       case "Help":
         this.showCommandMessage(
           "commands",
-          "/clear                 start a new session and clear the screen\n/model                 open model picker\n/model <id>            switch model directly\n/model default         use the catalog default\n/reasoning             open reasoning picker\n/reasoning <level>     switch reasoning directly\n/reasoning default     use the model default\n/usage                 show account limits and context usage",
+          "/sessions              switch sessions (Ctrl+P)\n/clear                 start a new session and clear the screen\n/model                 open model picker\n/model <id>            switch model directly\n/model default         use the catalog default\n/reasoning             open reasoning picker\n/reasoning <level>     switch reasoning directly\n/reasoning default     use the model default\n/usage                 show account limits and context usage",
         )
         return
       case "Usage":
         this.showCommandMessage("usage", "Fetching current limits…")
         this.onUsage?.()
+        return
+      case "Sessions":
+        this.openSessionPicker()
         return
       case "Unknown":
         this.showCommandMessage(
@@ -886,6 +952,42 @@ export class HarnessView {
         this.handleReasoningCommand(command.value)
         return
     }
+  }
+
+  private openSessionPicker(): void {
+    if (this.pickerOverlay !== undefined) return
+    if (this.sessions.length === 0) {
+      this.showCommandMessage("sessions", "Loading Codex sessions…")
+      this.onSessions?.()
+      return
+    }
+    const statusLabel = (status: CodexSession["status"]): string => ({
+      active: "● running",
+      waiting: "◆ needs input",
+      idle: "○ idle",
+      notLoaded: "○ idle",
+      systemError: "× error",
+    })[status]
+    const options: ReadonlyArray<SelectOption> = this.sessions.map((session) => ({
+      name: `${statusLabel(session.status)}  ${session.title}`,
+      description: `${new Date(session.updatedAt * 1_000).toLocaleString()} · ${session.id.slice(0, 8)}`,
+      value: session.id,
+    }))
+    const selected = Math.max(0, this.sessions.findIndex((session) => session.id === this.sessionId))
+    this.openPicker(
+      "Codex sessions",
+      "Switching views does not interrupt running sessions.",
+      options,
+      selected,
+      (index) => {
+        const session = this.sessions[index]
+        if (session === undefined || session.id === this.sessionId) return
+        this.setStatus(t`${fg(theme.accent)("● loading session…")}`)
+        this.input.placeholder = "Loading session history…"
+        this.input.blur()
+        this.onSessionSelect?.(session.id)
+      },
+    )
   }
 
   private clearSession(): void {

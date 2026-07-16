@@ -18,6 +18,7 @@ describe("slash commands", () => {
     expect(parseSlashCommand("/model")).toEqual({ _tag: "Model" })
     expect(parseSlashCommand("/help")).toEqual({ _tag: "Help" })
     expect(parseSlashCommand("/usage")).toEqual({ _tag: "Usage" })
+    expect(parseSlashCommand("/sessions")).toEqual({ _tag: "Sessions" })
     expect(parseSlashCommand("/compact")).toEqual({ _tag: "Unknown", name: "compact" })
     expect(parseSlashCommand("Inspect /model handling")).toBeUndefined()
   })
@@ -29,6 +30,7 @@ describe("slash commands", () => {
       "reasoning",
       "clear",
       "usage",
+      "sessions",
     ])
     expect(suggestSlashCommands("/M").map((command) => command.name)).toEqual(["model"])
     expect(suggestSlashCommands("/reasoning ")).toEqual([])

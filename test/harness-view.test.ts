@@ -70,6 +70,46 @@ describe("HarnessView", () => {
     expect(frame).toContain("Ask Codex, or type /help…")
   })
 
+  test("switches between composer and j/k transcript navigation", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 16, kittyKeyboard: true })
+    const { renderer } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+    const transcript = (
+      view as unknown as { transcript: { scrollTop: number; scrollTo(position: number): void } }
+    ).transcript
+
+    view.begin("A long conversation")
+    for (let index = 0; index < 12; index += 1) {
+      view.handleEvent({
+        _tag: "AgentMessageCompleted",
+        itemId: `message-${index}`,
+        text: `Response ${index}\nwith another line`,
+      })
+    }
+    await testRenderer.renderOnce()
+
+    expect(view.input.focused).toBe(true)
+    keys.pressEscape()
+    expect(view.input.focused).toBe(false)
+
+    transcript.scrollTo(Number.MAX_SAFE_INTEGER)
+    const bottom = transcript.scrollTop
+    keys.pressKey("k")
+    expect(transcript.scrollTop).toBeLessThan(bottom)
+    const scrolledUp = transcript.scrollTop
+    keys.pressKey("j")
+    expect(transcript.scrollTop).toBeGreaterThan(scrolledUp)
+    expect(view.input.value).toBe("")
+
+    keys.pressKey("l", { super: true })
+    expect(view.input.focused).toBe(true)
+    expect(transcript.scrollTop).toBe(bottom)
+
+    keys.pressKey("j")
+    expect(view.input.value).toBe("j")
+  })
+
   test("aligns readiness and model details on the same row", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 30 })
     const { renderer, renderOnce, captureCharFrame } = testRenderer
@@ -108,6 +148,36 @@ describe("HarnessView", () => {
     expect(frame).not.toContain("codex\n")
     expect(frame).toMatch(/◆ Thought for \d+\.\d+s/)
     expect(frame).toContain("The repository is ready.")
+  })
+
+  test("renders the selected session history", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30 })
+    const { renderer, waitFor, captureCharFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+
+    view.showSessionHistory({
+      session: {
+        id: "session-history",
+        title: "History test",
+        cwd: "/workspace/goxt",
+        updatedAt: 1,
+        status: "idle",
+      },
+      messages: [
+        { role: "user", text: "What changed?" },
+        { role: "assistant", text: "The **session switcher** changed." },
+      ],
+    })
+
+    await waitFor(() => {
+      renderer.requestRender()
+      return captureCharFrame().includes("session switcher changed")
+    })
+    const frame = captureCharFrame()
+    expect(view.currentSessionId).toBe("session-history")
+    expect(frame).toContain("What changed?")
+    expect(frame).toContain("The session switcher changed.")
+    expect(frame).toContain("Continue this session")
   })
 
   test("shows thought and worked durations around an assistant response", async () => {

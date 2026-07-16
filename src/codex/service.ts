@@ -11,6 +11,8 @@ import {
   type CodexEvent,
   type CodexModel,
   type CodexRateLimits,
+  type CodexSession,
+  type CodexSessionHistory,
   type CodexRunError,
   type CodexRunRequest,
   type CodexStatus,
@@ -22,6 +24,8 @@ export interface Interface {
   readonly status: () => Effect.Effect<CodexStatus>
   readonly listModels: () => Effect.Effect<ReadonlyArray<CodexModel>, CodexRunError>
   readonly readRateLimits: () => Effect.Effect<CodexRateLimits, CodexRunError>
+  readonly listSessions: (cwd: string) => Effect.Effect<ReadonlyArray<CodexSession>, CodexRunError>
+  readonly readSessionHistory: (sessionId: string) => Effect.Effect<CodexSessionHistory, CodexRunError>
   readonly run: (
     request: CodexRunRequest,
     onEvent: (event: CodexEvent) => void,
@@ -86,6 +90,57 @@ const RateLimitsResponse = Schema.Struct({
   rateLimitsByLimitId: Schema.optionalKey(
     Schema.NullOr(Schema.Record(Schema.String, RateLimitSnapshot)),
   ),
+})
+const ThreadStatus = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("notLoaded") }),
+  Schema.Struct({ type: Schema.Literal("idle") }),
+  Schema.Struct({ type: Schema.Literal("systemError") }),
+  Schema.Struct({
+    type: Schema.Literal("active"),
+    activeFlags: Schema.Array(Schema.String),
+  }),
+])
+const ThreadListResponse = Schema.Struct({
+  data: Schema.Array(Schema.Struct({
+    id: Schema.String,
+    preview: Schema.String,
+    name: Schema.NullOr(Schema.String),
+    cwd: Schema.String,
+    updatedAt: Schema.Number,
+    status: ThreadStatus,
+  })),
+  nextCursor: Schema.NullOr(Schema.String),
+})
+const ThreadReadResponse = Schema.Struct({
+  thread: Schema.Struct({
+    id: Schema.String,
+    preview: Schema.String,
+    name: Schema.NullOr(Schema.String),
+    cwd: Schema.String,
+    updatedAt: Schema.Number,
+    status: ThreadStatus,
+    turns: Schema.Array(Schema.Struct({ items: Schema.Array(Schema.Unknown) })),
+  }),
+})
+
+const sessionStatus = (status: Schema.Schema.Type<typeof ThreadStatus>): CodexSession["status"] =>
+  status.type === "active"
+    ? status.activeFlags.length > 0 ? "waiting" : "active"
+    : status.type
+
+const sessionSummary = (thread: {
+  readonly id: string
+  readonly preview: string
+  readonly name: string | null
+  readonly cwd: string
+  readonly updatedAt: number
+  readonly status: Schema.Schema.Type<typeof ThreadStatus>
+}): CodexSession => ({
+  id: thread.id,
+  title: thread.name?.trim() || thread.preview.trim() || "Untitled session",
+  cwd: thread.cwd,
+  updatedAt: thread.updatedAt,
+  status: sessionStatus(thread.status),
 })
 
 const readProcess = async (process: Bun.Subprocess<"ignore", "pipe", "pipe">) => {
@@ -336,6 +391,41 @@ export const layer = Layer.effect(
       } satisfies CodexRateLimits
     })
 
+    const listSessions = Effect.fn("CodexAppServer.listSessions")(function* (cwd: string) {
+      const response = yield* protocol.request("thread/list", {
+        limit: 100,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        cwd,
+        archived: false,
+      })
+      const decoded = yield* decodeResponse(ThreadListResponse, response, "thread/list")
+      return decoded.data.map(sessionSummary)
+    })
+
+    const readSessionHistory = Effect.fn("CodexAppServer.readSessionHistory")(function* (
+      sessionId: string,
+    ) {
+      const response = yield* protocol.request("thread/read", { threadId: sessionId, includeTurns: true })
+      const decoded = yield* decodeResponse(ThreadReadResponse, response, "thread/read")
+      const messages: CodexSessionHistory["messages"][number][] = []
+      for (const turn of decoded.thread.turns) {
+        for (const item of turn.items) {
+          if (typeof item !== "object" || item === null || !("type" in item)) continue
+          if (item.type === "agentMessage" && "text" in item && typeof item.text === "string") {
+            if (item.text.trim()) messages.push({ role: "assistant", text: item.text })
+          } else if (item.type === "userMessage" && "content" in item && Array.isArray(item.content)) {
+            const text = item.content.flatMap((part) =>
+              typeof part === "object" && part !== null && "type" in part && part.type === "text" &&
+              "text" in part && typeof part.text === "string" ? [part.text] : [],
+            ).join("\n")
+            if (text.trim()) messages.push({ role: "user", text })
+          }
+        }
+      }
+      return { session: sessionSummary(decoded.thread), messages }
+    })
+
     const ensureThread = Effect.fn("CodexAppServer.ensureThread")(function* (
       request: CodexRunRequest,
     ) {
@@ -474,6 +564,8 @@ export const layer = Layer.effect(
       status,
       listModels,
       readRateLimits,
+      listSessions,
+      readSessionHistory,
       run,
       steer,
       interrupt,
