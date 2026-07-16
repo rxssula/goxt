@@ -131,6 +131,12 @@ export const canReuseThread = (
 ): currentThreadId is string =>
   currentThreadId !== undefined && currentThreadId === requestedSessionId
 
+export const getInterruptTarget = (
+  threadId: string | undefined,
+  turnId: string | undefined,
+): { readonly threadId: string; readonly turnId: string } | undefined =>
+  threadId === undefined || turnId === undefined ? undefined : { threadId, turnId }
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -411,11 +417,16 @@ export const layer = Layer.effect(
 
     const interrupt = Effect.fn("CodexAppServer.interrupt")(function* () {
       const active = yield* Ref.get(activeRun)
-      if (active?.threadId === undefined || active.turnId === undefined) return
+      const target = getInterruptTarget(active?.threadId, active?.turnId)
+      if (target === undefined) {
+        return yield* Effect.fail(
+          new CodexRpcError({ message: "There is no active turn to interrupt.", code: -32_001 }),
+        )
+      }
       yield* Effect.raceFirst(
         protocol.request("turn/interrupt", {
-          threadId: active.threadId,
-          turnId: active.turnId,
+          threadId: target.threadId,
+          turnId: target.turnId,
         }),
         Effect.sleep("5 seconds").pipe(
           Effect.andThen(
