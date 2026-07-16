@@ -70,6 +70,22 @@ describe("HarnessView", () => {
     expect(frame).toContain("Ask Codex, or type /help…")
   })
 
+  test("aligns readiness and model details on the same row", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30 })
+    const { renderer, renderOnce, captureCharFrame } = testRenderer
+
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+    view.setCodexStatus({ available: true, authenticated: true, version: "0.144.1" })
+    view.setModels(models)
+
+    await renderOnce()
+    const statusLine = captureCharFrame()
+      .split("\n")
+      .find((line) => line.includes("● ready"))
+
+    expect(statusLine).toContain("gpt-default · low")
+  })
+
   test("switches to the transcript while running", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 30 })
     const { renderer, renderOnce, captureCharFrame } = testRenderer
@@ -87,10 +103,36 @@ describe("HarnessView", () => {
 
     expect(frame).not.toContain("starting Codex")
     expect(frame).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/)
-    expect(frame).toContain("you")
+    expect(frame).toContain("› Inspect the repository")
     expect(frame).toContain("Inspect the repository")
-    expect(frame).toContain("codex")
+    expect(frame).not.toContain("codex\n")
+    expect(frame).toMatch(/◆ Thought for \d+\.\d+s/)
     expect(frame).toContain("The repository is ready.")
+  })
+
+  test("shows thought and worked durations around an assistant response", async () => {
+    testRenderer = await createTestRenderer({ width: 100, height: 30 })
+    const { renderer, waitFor, captureCharFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+
+    view.begin("Time this turn")
+    view.handleEvent({
+      _tag: "AgentMessageCompleted",
+      itemId: "message-1",
+      text: "Done.",
+    })
+    view.handleEvent({ _tag: "TurnCompleted", turnId: "turn-1", status: "completed" })
+
+    await waitFor(() => {
+      renderer.requestRender()
+      return captureCharFrame().includes("Done.")
+    })
+    const frame = captureCharFrame()
+
+    expect(frame).toMatch(/◆ Thought for \d+\.\d+s/)
+    expect(frame).toMatch(/Worked for \d+\.\d+s\./)
+    expect(frame.indexOf("Thought for")).toBeLessThan(frame.indexOf("Done."))
+    expect(frame.indexOf("Done.")).toBeLessThan(frame.indexOf("Worked for"))
   })
 
   test("renders agent Markdown and hides fenced-code markers", async () => {

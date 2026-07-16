@@ -72,6 +72,14 @@ type PendingInteraction =
 const shortenPath = (path: string, max = 58): string =>
   path.length <= max ? path : `…${path.slice(-(max - 1))}`
 
+const formatMessageTime = (date = new Date()): string =>
+  date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+
+const formatElapsed = (milliseconds: number): string => {
+  const seconds = Math.max(0, milliseconds) / 1_000
+  return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`
+}
+
 const formatTokens = (tokens: number): string =>
   new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(tokens)
 
@@ -210,6 +218,9 @@ export class HarnessView {
   private selectedSlashCommand = 0
   private dismissedSlashCommandValue: string | undefined
   private latestTokenUsage: TokenUsageDetails | undefined
+  private turnStartedAt: number | undefined
+  private thoughtRecorded = false
+  private workedRecorded = false
   private readonly streamingMessages = new Map<
     string,
     { readonly renderable: MarkdownRenderable; text: string }
@@ -312,7 +323,7 @@ export class HarnessView {
       viewportCulling: true,
       contentOptions: {
         flexDirection: "column",
-        paddingTop: 1,
+        paddingTop: 2,
         paddingRight: 1,
       },
     })
@@ -325,7 +336,7 @@ export class HarnessView {
     const statusBar = new BoxRenderable(renderer, {
       id: "status-bar",
       width: "100%",
-      height: 2,
+      height: 1,
       flexDirection: "row",
       alignItems: "center",
       justifyContent: "space-between",
@@ -560,6 +571,9 @@ export class HarnessView {
 
   begin(prompt: string): void {
     this.busy = true
+    this.turnStartedAt = Date.now()
+    this.thoughtRecorded = false
+    this.workedRecorded = false
     this.hideSlashCommandMenu()
     this.welcome.visible = false
     this.transcript.visible = true
@@ -581,6 +595,7 @@ export class HarnessView {
       case "AgentMessageDelta": {
         let message = this.streamingMessages.get(event.itemId)
         if (message === undefined) {
+          this.addThoughtSummary()
           message = { renderable: this.addMarkdownMessage("codex", "", theme.accent), text: "" }
           this.streamingMessages.set(event.itemId, message)
         }
@@ -592,6 +607,7 @@ export class HarnessView {
       case "AgentMessageCompleted": {
         const message = this.streamingMessages.get(event.itemId)
         if (message === undefined) {
+          this.addThoughtSummary()
           const body = this.addMarkdownMessage("codex", event.text, theme.accent)
           body.streaming = false
         }
@@ -1346,6 +1362,38 @@ export class HarnessView {
   private finishTurnState(): void {
     this.finalizeStreamingMarkdown()
     this.clearInteractions()
+    this.addWorkedSummary()
+  }
+
+  private addThoughtSummary(): void {
+    if (this.thoughtRecorded) return
+    this.thoughtRecorded = true
+    const elapsed = this.turnStartedAt === undefined ? 0 : Date.now() - this.turnStartedAt
+    const row = new TextRenderable(this.renderer, {
+      content: t`${fg(theme.muted)("◆")} ${bold(fg(theme.muted)("Thought"))} ${fg(theme.subtle)(`for ${formatElapsed(elapsed)}`)}`,
+      height: 1,
+      marginBottom: 1,
+      marginLeft: 2,
+      selectable: false,
+    })
+    this.transcript.add(row)
+  }
+
+  private addWorkedSummary(): void {
+    if (this.workedRecorded || this.turnStartedAt === undefined || !this.thoughtRecorded) return
+    this.workedRecorded = true
+    const elapsed = Date.now() - this.turnStartedAt
+    this.transcript.add(
+      new TextRenderable(this.renderer, {
+        content: `Worked for ${formatElapsed(elapsed)}.`,
+        fg: theme.subtle,
+        height: 1,
+        marginBottom: 2,
+        marginLeft: 2,
+        selectable: false,
+      }),
+    )
+    this.transcript.scrollTo(Number.MAX_SAFE_INTEGER)
   }
 
   private finalizeStreamingMarkdown(): void {
@@ -1354,14 +1402,44 @@ export class HarnessView {
   }
 
   private addMessage(label: string, content: string, color: string): TextRenderable {
+    if (label === "you" || label === "you · steer") {
+      const message = new BoxRenderable(this.renderer, {
+        width: "100%",
+        minHeight: 3,
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "space-between",
+        marginBottom: 2,
+        paddingX: 2,
+        backgroundColor: theme.surface,
+      })
+      const body = new TextRenderable(this.renderer, {
+        content: t`${bold(fg(theme.text)("›"))} ${bold(fg(theme.text)(content))}`,
+        flexGrow: 1,
+      })
+      message.add(body)
+      message.add(
+        new TextRenderable(this.renderer, {
+          content: formatMessageTime().padStart(10),
+          fg: theme.subtle,
+          width: 10,
+          selectable: false,
+        }),
+      )
+      this.transcript.add(message)
+      this.transcript.scrollTo(Number.MAX_SAFE_INTEGER)
+      return body
+    }
+
     const message = new BoxRenderable(this.renderer, {
       width: "100%",
       flexDirection: "column",
-      marginBottom: 1,
+      marginBottom: 2,
+      paddingX: 2,
     })
     message.add(
       new TextRenderable(this.renderer, {
-        content: t`${bold(fg(color)(label))}`,
+        content: t`${fg(color)("◆")} ${bold(fg(color)(label))}`,
         height: 1,
       }),
     )
@@ -1384,14 +1462,9 @@ export class HarnessView {
     const message = new BoxRenderable(this.renderer, {
       width: "100%",
       flexDirection: "column",
-      marginBottom: 1,
+      marginBottom: 2,
+      paddingX: 2,
     })
-    message.add(
-      new TextRenderable(this.renderer, {
-        content: t`${bold(fg(color)(label))}`,
-        height: 1,
-      }),
-    )
     const body = new MarkdownRenderable(this.renderer, {
       content,
       syntaxStyle: this.markdownSyntaxStyle,
