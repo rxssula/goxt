@@ -206,10 +206,7 @@ export const layer = Layer.effect(
 
         const active = yield* Ref.get(activeRun)
         if (active === undefined) return
-        if (
-          event._tag === "TurnCompleted" &&
-          (active.turnId === undefined || active.turnId === event.turnId)
-        ) {
+        if (event._tag === "TurnCompleted" && active.turnId === event.turnId) {
           yield* Deferred.succeed(active.completion, event.status)
         } else if (event._tag === "TurnFailed") {
           yield* Deferred.fail(

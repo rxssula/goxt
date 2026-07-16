@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import type { RpcNotification, RpcServerRequest } from "./generated/protocol.js"
-import { CodexProtocolError, type CodexEvent } from "./types.js"
+import { CodexProtocolError, type ApprovalDecision, type CodexEvent } from "./types.js"
 
 const ThreadStarted = Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) })
 const TurnLifecycle = Schema.Struct({
@@ -69,14 +69,24 @@ const UserInputRequest = Schema.Struct({
     }),
   ),
 })
-const ServerRequestResolved = Schema.Struct({ requestId: Schema.Union([Schema.Number, Schema.String]) })
+const ServerRequestResolved = Schema.Struct({
+  requestId: Schema.Union([Schema.Number, Schema.String]),
+})
 
 const approvalDecisions = ["accept", "acceptForSession", "decline", "cancel"] as const
+const isApprovalDecision = (value: unknown): value is ApprovalDecision => {
+  switch (value) {
+    case "accept":
+    case "acceptForSession":
+    case "decline":
+    case "cancel":
+      return true
+    default:
+      return false
+  }
+}
 const availableApprovalDecisions = (value: ReadonlyArray<unknown> | null | undefined) => {
-  const available = value?.filter(
-    (decision): decision is (typeof approvalDecisions)[number] =>
-      typeof decision === "string" && approvalDecisions.includes(decision as never),
-  )
+  const available = value?.filter(isApprovalDecision)
   return value === undefined || value === null ? [...approvalDecisions] : (available ?? [])
 }
 

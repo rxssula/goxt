@@ -407,6 +407,36 @@ describe("HarnessView", () => {
     expect(decisions).toEqual(["decline", "decline", "accept"])
   })
 
+  test("drops unresolved interactions when a turn ends", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const approvals: Array<ApprovalDecision> = []
+    const submissions: Array<string> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onApproval: (_id, decision) => {
+        approvals.push(decision)
+      },
+      onSubmit: (prompt) => submissions.push(prompt),
+    })
+    view.begin("Start")
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: "stale",
+      kind: "command",
+      prompt: "Allow stale command?",
+      availableDecisions: ["accept"],
+      params: { threadId: "t", turnId: "turn", itemId: "stale" },
+    })
+
+    view.complete()
+    view.input.value = "Fresh prompt"
+    view.input.submit()
+
+    expect(approvals).toEqual([])
+    expect(submissions).toEqual(["Fresh prompt"])
+  })
+
   test("rejects secret input without rendering or collecting plaintext", async () => {
     testRenderer = await createTestRenderer({ width: 80, height: 24 })
     const { renderer, waitForFrame, captureCharFrame } = testRenderer

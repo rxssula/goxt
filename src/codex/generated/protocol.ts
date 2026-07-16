@@ -122,7 +122,7 @@ export interface CommandExecutionRequestApprovalParams {
   readonly command?: string | null
   readonly cwd?: string | null
   readonly reason?: string | null
-  readonly availableDecisions?: ReadonlyArray<ApprovalDecision> | null
+  readonly availableDecisions?: ReadonlyArray<unknown> | null
 }
 
 export interface FileChangeRequestApprovalParams {
@@ -158,8 +158,6 @@ export interface ToolRequestUserInputParams {
 export interface ToolRequestUserInputResponse {
   readonly answers: Readonly<Record<string, { readonly answers: ReadonlyArray<string> }>>
 }
-
-export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel"
 
 export interface ServerRequestResolvedNotification {
   readonly threadId: string

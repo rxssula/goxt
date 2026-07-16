@@ -19,9 +19,9 @@ Type a prompt and press Enter. The harness starts one scoped
 streams the Codex thread into the UI. While a turn is active, type another prompt
 to steer it. Press `Esc` to send `turn/interrupt` and `Ctrl+C` to quit.
 
-The interface is exercised at 100 columns by 30 rows and is intended for terminals
-around that size or larger. Its main panels shrink with the terminal, but very narrow
-or short windows may clip picker descriptions, command suggestions, or status text.
+The interface adapts to compact terminals by hiding secondary path and settings
+metadata, and collapses to the composer and status at very small sizes. The test suite
+exercises both the full 100×30 layout and compact layouts down to 35×12.
 
 Use `/model` to open a picker with the models available to the authenticated
 Codex account. Use `/reasoning` to open a picker with the selected model's
@@ -45,7 +45,10 @@ inspect and edit. The client also handles app-server reverse requests for comman
 approval, file-change approval, and structured user input if the active Codex
 configuration requests them. Approval and input requests are shown in the composer;
 if no turn is active, approvals are cancelled and user-input requests receive an empty
-answer. Unknown reverse-request methods receive JSON-RPC `Method not found` errors.
+answer. Requests are queued and remain retryable when a response fails. Because the
+current OpenTUI input does not support masking, secret-input requests are rejected with
+an empty answer instead of exposing secret text in the terminal. Unknown reverse-request
+methods receive JSON-RPC `Method not found` errors.
 
 Quitting destroys the terminal UI and disposes the Effect runtime. Scope cleanup closes
 the app-server stdin pipe and sends `SIGTERM` to the child process; it does not wait for

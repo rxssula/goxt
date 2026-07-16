@@ -90,6 +90,7 @@ const view = new HarnessView(renderer, cwd, {
 
     void runWithCodex(run)
       .then((result) => {
+        if (activeTurn === turn) activeTurn = undefined
         if (quitting) return
         if (result.ok) {
           if (result.status === "interrupted") view.interrupted()
@@ -97,10 +98,8 @@ const view = new HarnessView(renderer, cwd, {
         } else view.fail(result.message)
       })
       .catch(() => {
-        if (!quitting) view.fail("The Codex app-server turn stopped unexpectedly.")
-      })
-      .finally(() => {
         if (activeTurn === turn) activeTurn = undefined
+        if (!quitting) view.fail("The Codex app-server turn stopped unexpectedly.")
       })
   },
   onSettingsChange: (settings) => {

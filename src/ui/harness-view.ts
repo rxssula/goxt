@@ -39,14 +39,26 @@ interface Callbacks {
   readonly onSettingsChange?: (settings: CodexTurnSettings) => void
   readonly onSteer: (prompt: string) => void
   readonly onInterrupt: () => void
-  readonly onApproval: (requestId: number | string, decision: ApprovalDecision) => void | Promise<void>
-  readonly onUserInput: (requestId: number | string, response: ToolRequestUserInputResponse) => void | Promise<void>
+  readonly onApproval: (
+    requestId: number | string,
+    decision: ApprovalDecision,
+  ) => void | Promise<void>
+  readonly onUserInput: (
+    requestId: number | string,
+    response: ToolRequestUserInputResponse,
+  ) => void | Promise<void>
   readonly onUsage?: () => void
   readonly onQuit: () => void
 }
 
 type PendingInteraction =
-  | { readonly _tag: "Approval"; readonly requestId: number | string; readonly availableDecisions: ReadonlyArray<ApprovalDecision>; responding: boolean; expired: boolean }
+  | {
+      readonly _tag: "Approval"
+      readonly requestId: number | string
+      readonly availableDecisions: ReadonlyArray<ApprovalDecision>
+      responding: boolean
+      expired: boolean
+    }
   | {
       readonly _tag: "UserInput"
       readonly requestId: number | string
@@ -191,6 +203,7 @@ export class HarnessView {
   private codexStatus: CodexStatus | undefined
   private pickerOverlay: BoxRenderable | undefined
   private readonly pendingInteractions = new Map<number | string, PendingInteraction>()
+  private readonly interactionTimers = new Map<number | string, ReturnType<typeof setTimeout>>()
   private planBody: TextRenderable | undefined
   private matchingSlashCommands: ReadonlyArray<SlashCommandSuggestion> = []
   private selectedSlashCommand = 0
@@ -239,9 +252,9 @@ export class HarnessView {
       }),
     )
     this.headerPath = new TextRenderable(renderer, {
-        content: t`${fg(theme.subtle)(shortenPath(cwd))}`,
-        selectable: false,
-      })
+      content: t`${fg(theme.subtle)(shortenPath(cwd))}`,
+      selectable: false,
+    })
     header.add(this.headerPath)
 
     const main = new BoxRenderable(renderer, {
@@ -558,7 +571,8 @@ export class HarnessView {
         this.sessionId = event.threadId
         break
       case "TurnStarted":
-        this.streamingMessages.clear()
+        this.finalizeStreamingMarkdown()
+        this.planBody = undefined
         break
       case "AgentMessageDelta": {
         let message = this.streamingMessages.get(event.itemId)
@@ -670,10 +684,12 @@ export class HarnessView {
         this.resolveInteraction(event.requestId)
         break
       case "TurnFailed":
+        this.finishTurnState()
         this.setStatus(t`${fg(theme.error)("●")} ${fg(theme.error)(event.message)}`)
         break
       case "TurnCompleted":
-        this.finalizeStreamingMarkdown()
+        this.finishTurnState()
+        break
       case "Unknown":
         break
     }
@@ -681,7 +697,7 @@ export class HarnessView {
 
   complete(): void {
     this.busy = false
-    this.finalizeStreamingMarkdown()
+    this.finishTurnState()
     this.setStatus(t`${fg(theme.accent)("● ready")}`)
     this.input.placeholder = "Continue the session, or type /help…"
     this.input.focus()
@@ -689,7 +705,7 @@ export class HarnessView {
 
   interrupted(): void {
     this.busy = false
-    this.finalizeStreamingMarkdown()
+    this.finishTurnState()
     this.setStatus(t`${fg(theme.muted)("○ interrupted")}`)
     this.input.placeholder = "Continue the session, or type /help…"
     this.input.focus()
@@ -710,6 +726,7 @@ export class HarnessView {
 
   fail(message: string): void {
     this.busy = false
+    this.finishTurnState()
     this.addMessage("error", message, theme.error)
     this.setStatus(t`${fg(theme.error)("● failed")} ${fg(theme.muted)("· check the message above")}`)
     this.input.placeholder = "Try another prompt, or type /help…"
@@ -717,6 +734,7 @@ export class HarnessView {
   }
 
   destroy(): void {
+    this.clearInteractions()
     this.markdownSyntaxStyle.destroy()
     this.renderer.destroy()
   }
@@ -853,7 +871,7 @@ export class HarnessView {
   private clearSession(): void {
     this.sessionId = undefined
     this.latestTokenUsage = undefined
-    this.pendingInteractions.clear()
+    this.clearInteractions()
     this.planBody = undefined
     this.streamingMessages.clear()
     for (const child of this.transcript.getChildren()) {
@@ -1263,6 +1281,7 @@ export class HarnessView {
   }
 
   private resolveInteraction(requestId: number | string): void {
+    this.clearInteractionTimer(requestId)
     this.pendingInteractions.delete(requestId)
     this.activateNextInteraction()
   }
@@ -1270,19 +1289,57 @@ export class HarnessView {
   private restoreInteraction(requestId: number | string): void {
     const interaction = this.pendingInteractions.get(requestId)
     if (interaction === undefined) return
+    if (interaction._tag === "UserInput" && interaction.isSecret) {
+      interaction.expired = true
+      this.addMessage(
+        "error",
+        "Could not reject the secret request; waiting for Codex to resolve it.",
+        theme.error,
+      )
+      this.activateNextInteraction()
+      return
+    }
     interaction.responding = false
-    this.addMessage("error", "Could not send the response. The request is still pending.", theme.error)
+    this.addMessage(
+      "error",
+      "Could not send the response. The request is still pending.",
+      theme.error,
+    )
     this.activateNextInteraction()
   }
 
   private scheduleAutoResolution(requestId: number | string, delay: number): void {
-    setTimeout(() => {
+    this.clearInteractionTimer(requestId)
+    const timer = setTimeout(() => {
+      this.interactionTimers.delete(requestId)
       const interaction = this.pendingInteractions.get(requestId)
-      if (interaction === undefined || interaction.responding) return
-      interaction.expired = true
-      this.addMessage("codex · question", "This request reached its automatic-resolution deadline.", theme.muted)
+      if (interaction === undefined) return
+      this.pendingInteractions.delete(requestId)
+      this.addMessage(
+        "codex · question",
+        "This request reached its automatic-resolution deadline.",
+        theme.muted,
+      )
       this.activateNextInteraction()
     }, Math.max(0, delay))
+    this.interactionTimers.set(requestId, timer)
+  }
+
+  private clearInteractionTimer(requestId: number | string): void {
+    const timer = this.interactionTimers.get(requestId)
+    if (timer !== undefined) clearTimeout(timer)
+    this.interactionTimers.delete(requestId)
+  }
+
+  private clearInteractions(): void {
+    for (const timer of this.interactionTimers.values()) clearTimeout(timer)
+    this.interactionTimers.clear()
+    this.pendingInteractions.clear()
+  }
+
+  private finishTurnState(): void {
+    this.finalizeStreamingMarkdown()
+    this.clearInteractions()
   }
 
   private finalizeStreamingMarkdown(): void {
