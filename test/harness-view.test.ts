@@ -5,7 +5,7 @@ import {
   type TestRendererSetup,
 } from "@opentui/core/testing"
 import { HarnessView } from "../src/ui/harness-view.js"
-import type { CodexModel, CodexTurnSettings } from "../src/codex/types.js"
+import type { ApprovalDecision, CodexModel, CodexTurnSettings } from "../src/codex/types.js"
 
 let testRenderer: TestRendererSetup | undefined
 
@@ -95,7 +95,7 @@ describe("HarnessView", () => {
 
   test("renders agent Markdown and hides fenced-code markers", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 36 })
-    const { renderer, renderOnce, captureCharFrame } = testRenderer
+    const { renderer, waitFor, captureCharFrame } = testRenderer
 
     const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
     view.begin("Show me the result")
@@ -113,9 +113,10 @@ describe("HarnessView", () => {
       ].join("\n"),
     })
 
-    await renderOnce()
-    await new Promise<void>((resolve) => setTimeout(resolve, 500))
-    await renderOnce()
+    await waitFor(() => {
+      renderer.requestRender()
+      return captureCharFrame().includes("Result")
+    })
     const frame = captureCharFrame()
 
     expect(frame).toContain("Result")
@@ -152,7 +153,7 @@ describe("HarnessView", () => {
   test("applies picker selections to the next turn", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 30 })
     const { renderer } = testRenderer
-    const keys = createMockKeys(renderer)
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
     const submissions: Array<{ prompt: string; settings: CodexTurnSettings }> = []
     const view = new HarnessView(renderer, "/workspace/goxt", {
       ...callbacks,
@@ -212,7 +213,7 @@ describe("HarnessView", () => {
   test("closes a picker with escape and restores the composer", async () => {
     testRenderer = await createTestRenderer({ width: 100, height: 30 })
     const { renderer, renderOnce, captureCharFrame } = testRenderer
-    const keys = createMockKeys(renderer)
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
     const submissions: Array<string> = []
     const view = new HarnessView(renderer, "/workspace/goxt", {
       ...callbacks,
@@ -223,10 +224,9 @@ describe("HarnessView", () => {
     view.input.value = "/model"
     view.input.submit()
     keys.pressEscape()
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await testRenderer.waitForFrame((frame) => !frame.includes("Choose model"))
     view.input.value = "Continue normally"
     view.input.submit()
-    await renderOnce()
 
     expect(captureCharFrame()).not.toContain("Choose model")
     expect(submissions).toEqual(["Continue normally"])
@@ -359,5 +359,191 @@ describe("HarnessView", () => {
     view.input.value = "Fresh prompt"
     view.input.submit()
     expect(submissions).toEqual(["Fresh prompt"])
+  })
+
+  test("queues reverse requests, honors decisions, and retains failed responses", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer, waitForFrame } = testRenderer
+    let attempts = 0
+    const decisions: Array<ApprovalDecision> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onApproval: async (_id, decision) => {
+        decisions.push(decision)
+        attempts += 1
+        if (attempts === 1) throw new Error("retry")
+      },
+    })
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: 1,
+      kind: "command",
+      prompt: "Allow first?",
+      availableDecisions: ["decline", "cancel"],
+      params: { threadId: "t", turnId: "turn", itemId: "one" },
+    })
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: 2,
+      kind: "file-change",
+      prompt: "Allow second?",
+      availableDecisions: ["accept"],
+      params: { threadId: "t", turnId: "turn", itemId: "two" },
+    })
+
+    view.input.value = "y"
+    view.input.submit()
+    expect(decisions).toEqual([])
+    view.input.value = "n"
+    view.input.submit()
+    await testRenderer.flush()
+    await waitForFrame((frame) => frame.includes("still pending"))
+    view.input.value = "n"
+    view.input.submit()
+    await testRenderer.flush()
+    view.input.value = "y"
+    view.input.submit()
+    await testRenderer.flush()
+    expect(decisions).toEqual(["decline", "decline", "accept"])
+  })
+
+  test("keeps the unsupported approval explanation visible", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer, waitForFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: "unsupported",
+      kind: "command",
+      prompt: "Allow an unsupported command?",
+      availableDecisions: [],
+      params: { threadId: "t", turnId: "turn", itemId: "item" },
+    })
+
+    await waitForFrame((frame) => frame.includes("No supported approval decision"))
+  })
+
+  test("keeps invalid approval guidance limited to available decisions", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: 1,
+      kind: "file-change",
+      prompt: "Allow the file change?",
+      availableDecisions: ["accept"],
+      params: { threadId: "t", turnId: "turn", itemId: "item" },
+    })
+
+    view.input.value = "n"
+    view.input.submit()
+
+    expect(view.input.placeholder).toBe("Type accept…")
+  })
+
+  test("drops unresolved interactions when a turn ends", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const approvals: Array<ApprovalDecision> = []
+    const submissions: Array<string> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onApproval: (_id, decision) => {
+        approvals.push(decision)
+      },
+      onSubmit: (prompt) => submissions.push(prompt),
+    })
+    view.begin("Start")
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: "stale",
+      kind: "command",
+      prompt: "Allow stale command?",
+      availableDecisions: ["accept"],
+      params: { threadId: "t", turnId: "turn", itemId: "stale" },
+    })
+
+    view.complete()
+    view.input.value = "Fresh prompt"
+    view.input.submit()
+
+    expect(approvals).toEqual([])
+    expect(submissions).toEqual(["Fresh prompt"])
+  })
+
+  test("rejects secret input without rendering or collecting plaintext", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer, waitForFrame, captureCharFrame } = testRenderer
+    const responses: Array<unknown> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onUserInput: (_id, response) => {
+        responses.push(response)
+      },
+    })
+    view.handleEvent({
+      _tag: "UserInputRequested",
+      requestId: "secret",
+      autoResolutionMs: null,
+      questions: [{ id: "token", header: "Token", question: "Enter token", isOther: false, isSecret: true, options: null }],
+    })
+
+    await waitForFrame((frame) => frame.includes("Secret input is unsupported"))
+    expect(captureCharFrame()).not.toContain("super-secret")
+    expect(responses).toEqual([{ answers: { token: { answers: [] } } }])
+  })
+
+  test("keeps omitted answers empty for multiple questions", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer } = testRenderer
+    const responses: Array<unknown> = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onUserInput: (_id, response) => {
+        responses.push(response)
+      },
+    })
+    view.handleEvent({
+      _tag: "UserInputRequested",
+      requestId: "multiple",
+      autoResolutionMs: null,
+      questions: [
+        { id: "first", header: "First", question: "First answer", isOther: false, isSecret: false, options: null },
+        { id: "second", header: "Second", question: "Second answer", isOther: false, isSecret: false, options: null },
+        { id: "third", header: "Third", question: "Third answer", isOther: false, isSecret: false, options: null },
+      ],
+    })
+
+    view.input.value = "provided|"
+    view.input.submit()
+
+    expect(responses).toEqual([
+      {
+        answers: {
+          first: { answers: ["provided"] },
+          second: { answers: [""] },
+          third: { answers: [""] },
+        },
+      },
+    ])
+  })
+
+  test("updates plan and activity in place and stays legible at compact sizes", async () => {
+    testRenderer = await createTestRenderer({ width: 50, height: 16 })
+    const { renderer, resize, waitForFrame, captureCharFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/a/very/long/repository/path", callbacks)
+    view.begin("Work")
+    view.handleEvent({ _tag: "Activity", label: "Searching the web" })
+    view.handleEvent({ _tag: "PlanUpdated", explanation: null, steps: [{ step: "First", status: "inProgress" }] })
+    view.handleEvent({ _tag: "PlanUpdated", explanation: null, steps: [{ step: "Second", status: "completed" }] })
+    await waitForFrame((frame) => frame.includes("Searching the web") && frame.includes("Second"))
+    expect(captureCharFrame()).not.toContain("First")
+    expect(captureCharFrame().match(/plan/g)?.length).toBe(1)
+
+    resize(35, 12)
+    await waitForFrame((frame) => frame.includes("Steer the active turn"))
+    expect(captureCharFrame()).not.toContain("/workspace/a/very/long")
   })
 })

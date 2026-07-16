@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
-import { jsonLines, parseRpcMessage } from "../src/codex/protocol.js"
+import { Effect, Exit } from "effect"
+import { jsonLines, make, parseRpcMessage } from "../src/codex/protocol.js"
 
 describe("Codex JSON-RPC protocol", () => {
   test("splits JSONL across arbitrary chunks", async () => {
@@ -39,5 +39,62 @@ describe("Codex JSON-RPC protocol", () => {
       method: "item/fileChange/requestApproval",
       params: {},
     })
+  })
+
+  test("fails requests made after the reader closes", async () => {
+    const process = Bun.spawn(["bun", "-e", "process.stdout.end()"], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+
+    const exit = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const protocol = yield* make(process)
+          yield* Effect.flip(protocol.closed)
+          return yield* Effect.exit(protocol.request("after/close", {}))
+        }),
+      ),
+    )
+
+    expect(Exit.isFailure(exit)).toBe(true)
+  })
+
+  test("does not write a request after the protocol closes", async () => {
+    const writes: Array<string> = []
+    const process = {
+      stdin: {
+        write: async (message: string) => {
+          writes.push(message)
+          throw new Error("stdin is closed")
+        },
+        flush: async () => {},
+      },
+      stdout: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      stderr: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.close()
+        },
+      }),
+      exited: Promise.resolve(1),
+    } as unknown as Bun.Subprocess<"pipe", "pipe", "pipe">
+
+    const requestExit = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const protocol = yield* make(process)
+          yield* Effect.exit(protocol.closed)
+          return yield* Effect.exit(protocol.request("after/close", {}))
+        }),
+      ),
+    )
+
+    expect(Exit.isFailure(requestExit)).toBe(true)
+    expect(writes).toEqual([])
   })
 })

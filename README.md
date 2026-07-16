@@ -4,7 +4,7 @@ A minimal terminal harness for the Codex CLI, built with OpenTUI and Effect.
 
 ## Requirements
 
-- [Bun](https://bun.sh)
+- [Bun 1.3.13](https://bun.sh) (the version recorded in `package.json`)
 - Codex CLI installed and authenticated (`codex login status`)
 
 ## Run
@@ -18,6 +18,10 @@ Type a prompt and press Enter. The harness starts one scoped
 `codex app-server --stdio` process, initializes its JSON-RPC connection, and
 streams the Codex thread into the UI. While a turn is active, type another prompt
 to steer it. Press `Esc` to send `turn/interrupt` and `Ctrl+C` to quit.
+
+The interface adapts to compact terminals by hiding secondary path and settings
+metadata, and collapses to the composer and status at very small sizes. The test suite
+exercises both the full 100×30 layout and compact layouts down to 35×12.
 
 Use `/model` to open a picker with the models available to the authenticated
 Codex account. Use `/reasoning` to open a picker with the selected model's
@@ -39,7 +43,16 @@ the same app-server process. Turns use `workspace-write` and non-interactive
 approvals, so start the harness only in a directory you intend to let Codex
 inspect and edit. The client also handles app-server reverse requests for command
 approval, file-change approval, and structured user input if the active Codex
-configuration requests them.
+configuration requests them. Approval and input requests are shown in the composer;
+if no turn is active, approvals are cancelled and user-input requests receive an empty
+answer. Requests are queued and remain retryable when a response fails. Because the
+current OpenTUI input does not support masking, secret-input requests are rejected with
+an empty answer instead of exposing secret text in the terminal. Unknown reverse-request
+methods receive JSON-RPC `Method not found` errors.
+
+Quitting destroys the terminal UI and disposes the Effect runtime. Scope cleanup closes
+the app-server stdin pipe and sends `SIGTERM` to the child process; it does not wait for
+an active turn to complete. `Esc` is the graceful way to interrupt only the current turn.
 
 ## Architecture
 
@@ -56,5 +69,18 @@ configuration requests them.
 
 ## Commands
 
+- `bun run dev` — run with watch mode
+- `bun start` — run once
 - `bun run check` — type-check
 - `bun test` — run tests
+- `bun run validate` — type-check and run tests
+- `bun run protocol:verify` — generate bindings with the installed Codex CLI and
+  verify that the checked-in slim snapshot still names the required protocol surface
+- `bun run protocol:generate` — regenerate full bindings into the ignored
+  `.protocol-snapshot/` directory for reviewing and manually updating the slim snapshot
+
+Protocol verification is deliberately opt-in: ordinary tests use only the checked-in
+snapshot and do not depend on whichever Codex CLI happens to be installed. After a Codex
+upgrade, run `bun run protocol:generate`, reconcile the relevant types in
+`src/codex/generated/protocol.ts`, update its source-version comment, and then run
+`bun run protocol:verify` and `bun run validate`.
