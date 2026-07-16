@@ -1,6 +1,7 @@
 import { Context, Deferred, Effect, Layer, Ref, Schema, Stream } from "effect"
 import { parseCodexNotification, parseCodexServerRequest } from "./event.js"
 import type { ToolRequestUserInputResponse } from "./generated/protocol.js"
+import type { UserInput } from "./generated/protocol.js"
 import { CodexProtocol } from "./protocol.js"
 import {
   CodexNotAuthenticated,
@@ -49,6 +50,7 @@ interface ActiveRun {
   readonly onEvent: (event: CodexEvent) => void
   readonly threadId?: string
   readonly turnId?: string
+  readonly earlyCompletions?: ReadonlyMap<string, string>
 }
 
 const ThreadResponse = Schema.Struct({ thread: Schema.Struct({ id: Schema.String }) })
@@ -179,7 +181,35 @@ const decodeResponse = <A, E>(
     ),
   )
 
-const textInput = (text: string) => [{ type: "text" as const, text, text_elements: [] }]
+const imageExtension = /\.(?:avif|bmp|gif|jpe?g|png|webp)$/i
+const imageReference = /!?\[[^\]]*\]\((https?:\/\/[^\s)]+|file:\/\/[^\s)]+|\/[^\s)]+)\)|(?:^|\s)(https?:\/\/[^\s]+|file:\/\/[^\s]+|\/[^\s]+\.(?:avif|bmp|gif|jpe?g|png|webp))(?=\s|$)/gim
+
+export const promptInput = (prompt: string): ReadonlyArray<UserInput> => {
+  if (/\[Image #\d+\]/i.test(prompt)) {
+    throw new CodexProtocolError({
+      message: "The pasted image has no file path. Save it and paste its absolute path (or an image URL).",
+    })
+  }
+
+  const inputs: UserInput[] = []
+  const consumed: Array<{ start: number; end: number }> = []
+  for (const match of prompt.matchAll(imageReference)) {
+    const reference = match[1] ?? match[2]
+    if (reference === undefined || match.index === undefined) continue
+    const clean = reference.replace(/[.,;:]$/, "")
+    if (!imageExtension.test(new URL(clean, "file://").pathname)) continue
+    inputs.push(clean.startsWith("http")
+      ? { type: "image", url: clean }
+      : { type: "localImage", path: clean.replace(/^file:\/\//, "") })
+    consumed.push({ start: match.index, end: match.index + match[0].length })
+  }
+  const text = consumed.reduceRight(
+    (value, range) => value.slice(0, range.start) + value.slice(range.end),
+    prompt,
+  ).trim()
+  if (text) inputs.unshift({ type: "text", text, text_elements: [] })
+  return inputs
+}
 
 export const canReuseThread = (
   currentThreadId: string | undefined,
@@ -280,8 +310,15 @@ export const layer = Layer.effect(
 
         const active = yield* Ref.get(activeRun)
         if (active === undefined) return
-        if (event._tag === "TurnCompleted" && active.turnId === event.turnId) {
-          yield* Deferred.succeed(active.completion, event.status)
+        if (event._tag === "TurnCompleted") {
+          if (active.turnId === event.turnId) {
+            yield* Deferred.succeed(active.completion, event.status)
+          } else if (active.turnId === undefined) {
+            yield* Ref.update(activeRun, (current) => current === undefined ? undefined : {
+              ...current,
+              earlyCompletions: new Map(current.earlyCompletions).set(event.turnId, event.status),
+            })
+          }
         } else if (event._tag === "TurnFailed") {
           yield* Deferred.fail(
             active.completion,
@@ -483,7 +520,7 @@ export const layer = Layer.effect(
         const threadId = yield* ensureThread(request)
         const response = yield* protocol.request("turn/start", {
           threadId,
-          input: textInput(request.prompt),
+          input: promptInput(request.prompt),
           cwd: request.cwd,
           ...(request.model === undefined ? {} : { model: request.model }),
           ...(request.reasoningEffort === undefined ? {} : { effort: request.reasoningEffort }),
@@ -492,6 +529,9 @@ export const layer = Layer.effect(
         yield* Ref.update(activeRun, (active) =>
           active === undefined ? undefined : { ...active, threadId, turnId: decoded.turn.id },
         )
+        const active = yield* Ref.get(activeRun)
+        const earlyStatus = active?.earlyCompletions?.get(decoded.turn.id)
+        if (earlyStatus !== undefined) yield* Deferred.succeed(completion, earlyStatus)
         return yield* Effect.raceFirst(
           Deferred.await(completion),
           protocol.closed.pipe(Effect.andThen(Effect.never)),
@@ -517,7 +557,7 @@ export const layer = Layer.effect(
       }
       const response = yield* protocol.request("turn/steer", {
         threadId: active.threadId,
-        input: textInput(prompt),
+        input: promptInput(prompt),
         expectedTurnId: active.turnId,
       })
       yield* decodeResponse(SteerResponse, response, "turn/steer")

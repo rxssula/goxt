@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import {
   canReuseThread,
   getInterruptTarget,
+  promptInput,
   rejectUnsupportedApproval,
 } from "../src/codex/service.js"
 import { unsupportedApprovalMessage } from "../src/codex/types.js"
@@ -43,6 +44,26 @@ describe("Codex app-server thread selection", () => {
 
     expect(rejected).toBe(true)
     expect(errors).toEqual([["approval", -32602, unsupportedApprovalMessage]])
+  })
+})
+
+describe("Codex prompt input", () => {
+  test("turns local image paths into image inputs", () => {
+    expect(promptInput("Inspect /tmp/screenshot.png please")).toEqual([
+      { type: "text", text: "Inspect please", text_elements: [] },
+      { type: "localImage", path: "/tmp/screenshot.png" },
+    ])
+  })
+
+  test("turns Markdown image URLs into image inputs", () => {
+    expect(promptInput("What is this? ![shot](https://example.com/shot.webp)")).toEqual([
+      { type: "text", text: "What is this?", text_elements: [] },
+      { type: "image", url: "https://example.com/shot.webp" },
+    ])
+  })
+
+  test("rejects unresolvable pasted-image markers", () => {
+    expect(() => promptInput("Look at [Image #1]")).toThrow("has no file path")
   })
 })
 
