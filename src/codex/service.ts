@@ -15,6 +15,7 @@ import {
   type CodexRunRequest,
   type CodexStatus,
   CodexUnavailable,
+  unsupportedApprovalMessage,
 } from "./types.js"
 
 export interface Interface {
@@ -137,6 +138,18 @@ export const getInterruptTarget = (
 ): { readonly threadId: string; readonly turnId: string } | undefined =>
   threadId === undefined || turnId === undefined ? undefined : { threadId, turnId }
 
+export const rejectUnsupportedApproval = Effect.fn("CodexAppServer.rejectUnsupportedApproval")(
+  function* (
+    protocol: Pick<CodexProtocol.Interface, "respondError">,
+    requestId: number | string,
+    event: CodexEvent,
+  ) {
+    if (event._tag !== "ApprovalRequested" || event.availableDecisions.length > 0) return false
+    yield* protocol.respondError(requestId, -32_602, unsupportedApprovalMessage)
+    return true
+  },
+)
+
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -236,7 +249,12 @@ export const layer = Layer.effect(
           return
         }
 
+        const rejected = yield* rejectUnsupportedApproval(protocol, request.id, event)
         const active = yield* Ref.get(activeRun)
+        if (rejected) {
+          if (active !== undefined) yield* emit(event)
+          return
+        }
         if (active === undefined) {
           if (event._tag === "ApprovalRequested") {
             yield* protocol.respond(request.id, { decision: "cancel" })

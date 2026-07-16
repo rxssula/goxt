@@ -407,6 +407,23 @@ describe("HarnessView", () => {
     expect(decisions).toEqual(["decline", "decline", "accept"])
   })
 
+  test("keeps the unsupported approval explanation visible", async () => {
+    testRenderer = await createTestRenderer({ width: 80, height: 24 })
+    const { renderer, waitForFrame } = testRenderer
+    const view = new HarnessView(renderer, "/workspace/goxt", callbacks)
+
+    view.handleEvent({
+      _tag: "ApprovalRequested",
+      requestId: "unsupported",
+      kind: "command",
+      prompt: "Allow an unsupported command?",
+      availableDecisions: [],
+      params: { threadId: "t", turnId: "turn", itemId: "item" },
+    })
+
+    await waitForFrame((frame) => frame.includes("No supported approval decision"))
+  })
+
   test("drops unresolved interactions when a turn ends", async () => {
     testRenderer = await createTestRenderer({ width: 80, height: 24 })
     const { renderer } = testRenderer

@@ -62,6 +62,9 @@ export interface CodexRateLimits {
 
 export type ApprovalDecision = "accept" | "acceptForSession" | "decline" | "cancel"
 
+export const unsupportedApprovalMessage =
+  "No supported approval decision is available in this client."
+
 export type CodexEvent =
   | { readonly _tag: "ThreadStarted"; readonly threadId: string }
   | { readonly _tag: "TurnStarted"; readonly turnId: string }

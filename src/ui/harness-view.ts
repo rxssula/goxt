@@ -17,13 +17,14 @@ import {
 } from "@opentui/core"
 import { SpinnerRenderable } from "opentui-spinner"
 import type { ToolRequestUserInputResponse } from "../codex/generated/protocol.js"
-import type {
-  ApprovalDecision,
-  CodexEvent,
-  CodexModel,
-  CodexRateLimits,
-  CodexStatus,
-  CodexTurnSettings,
+import {
+  unsupportedApprovalMessage,
+  type ApprovalDecision,
+  type CodexEvent,
+  type CodexModel,
+  type CodexRateLimits,
+  type CodexStatus,
+  type CodexTurnSettings,
 } from "../codex/types.js"
 import { theme } from "./theme.js"
 import {
@@ -635,7 +636,7 @@ export class HarnessView {
         if (event.availableDecisions.length === 0) {
           const interaction = this.pendingInteractions.get(event.requestId)
           if (interaction !== undefined) interaction.expired = true
-          this.addMessage("approval", "No supported approval decision is available in this client.", theme.error)
+          this.addMessage("approval", unsupportedApprovalMessage, theme.error)
         }
         this.activateNextInteraction()
         break
