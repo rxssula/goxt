@@ -14,6 +14,14 @@ import type {
 
 let testRenderer: TestRendererSetup | undefined
 
+const waitFor = async (condition: () => boolean, timeoutMs = 1_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Condition was not met within ${timeoutMs} ms`)
+    await Bun.sleep(5)
+  }
+}
+
 const callbacks = {
   onSubmit: () => undefined,
   onSteer: () => undefined,
@@ -133,7 +141,7 @@ describe("HarnessView", () => {
       "base64",
     ))
     renderer.keyInput.processPaste(png, { kind: "binary", mimeType: "image/png" })
-    await Bun.sleep(25)
+    await waitFor(() => view.input.value === "[Image #1]")
 
     expect(view.input.value).toBe("[Image #1]")
     keys.pressEnter()

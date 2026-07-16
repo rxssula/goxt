@@ -102,6 +102,7 @@ const view = new HarnessView(renderer, cwd, {
 
     void runWithCodex(run)
       .then((result) => {
+        view.releaseAttachments(images)
         if (activeTurn === turn) activeTurn = undefined
         if (quitting) return
         if (turn.sessionId !== view.currentSessionId) return
@@ -111,6 +112,7 @@ const view = new HarnessView(renderer, cwd, {
         } else view.fail(result.message)
       })
       .catch(() => {
+        view.releaseAttachments(images)
         if (activeTurn === turn) activeTurn = undefined
         if (!quitting) view.fail("The Codex app-server turn stopped unexpectedly.")
       })
@@ -119,12 +121,21 @@ const view = new HarnessView(renderer, cwd, {
     void saveSettings(settings)
   },
   onSteer: (prompt, images) => {
-    runAction(
+    void runWithCodex(
       Effect.gen(function* () {
         const codex = yield* CodexAppServer.Service
         yield* codex.steer(prompt, images.map((image) => image.path))
-      }),
-    )
+      }).pipe(Effect.match({
+        onFailure: (error) => ({ ok: false as const, message: error.message }),
+        onSuccess: () => ({ ok: true as const }),
+      })),
+    ).then((result) => {
+      view.releaseAttachments(images)
+      if (!result.ok && !quitting) view.actionFailed(result.message)
+    }).catch(() => {
+      view.releaseAttachments(images)
+      if (!quitting) view.actionFailed("The Codex app-server action stopped unexpectedly.")
+    })
   },
   onInterrupt: () => {
     const turn = activeTurn

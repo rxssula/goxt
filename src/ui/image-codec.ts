@@ -14,37 +14,38 @@ export interface ClipboardImage {
   readonly mimeType: string
 }
 
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024
+const MAX_IMAGE_PIXELS = 40_000_000
+
+const assertPixelLimit = (width: number, height: number): void => {
+  if (width <= 0 || height <= 0 || width * height > MAX_IMAGE_PIXELS) {
+    throw new Error("Image exceeds the 40 megapixel limit")
+  }
+}
+
+const jpegDimensions = (bytes: Uint8Array): readonly [number, number] => {
+  let offset = 2
+  while (offset + 8 < bytes.length) {
+    if (bytes[offset] !== 0xff) { offset += 1; continue }
+    const marker = bytes[offset + 1]!
+    const length = (bytes[offset + 2]! << 8) | bytes[offset + 3]!
+    if (length < 2) break
+    if ((marker >= 0xc0 && marker <= 0xc3) || (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) || (marker >= 0xcd && marker <= 0xcf)) {
+      return [
+        (bytes[offset + 7]! << 8) | bytes[offset + 8]!,
+        (bytes[offset + 5]! << 8) | bytes[offset + 6]!,
+      ]
+    }
+    offset += 2 + length
+  }
+  throw new Error("JPEG dimensions could not be read")
+}
+
 export const readMacClipboardImage = async (): Promise<ClipboardImage | undefined> => {
   if (process.platform !== "darwin") return undefined
-  const script = `
-    ObjC.import("AppKit");
-    const pasteboard = $.NSPasteboard.generalPasteboard;
-    const types = [["public.png", "image/png"], ["public.tiff", "image/tiff"]];
-    let result = "";
-    for (const [type, mime] of types) {
-      const data = pasteboard.dataForType(type);
-      if (data) {
-        result = mime + "\\t" + data.base64EncodedStringWithOptions(0).js;
-        break;
-      }
-    }
-    result;
-  `
-  const child = Bun.spawn(["osascript", "-l", "JavaScript", "-e", script], {
-    stdout: "pipe",
-    stderr: "ignore",
-  })
-  const [output, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    child.exited,
-  ])
-  if (exitCode !== 0) return undefined
-  const separator = output.indexOf("\t")
-  if (separator < 0) return undefined
-  const mimeType = output.slice(0, separator).trim()
-  const base64 = output.slice(separator + 1).trim()
-  if (!mimeType.startsWith("image/") || base64.length === 0) return undefined
-  return { bytes: Uint8Array.from(Buffer.from(base64, "base64")), mimeType }
+  const { readNativeMacClipboardImage } = await import("./macos-clipboard.js")
+  return readNativeMacClipboardImage()
 }
 
 export const detectImageFormat = (bytes: Uint8Array): DecodedImage["format"] | undefined => {
@@ -58,12 +59,17 @@ export const detectImageFormat = (bytes: Uint8Array): DecodedImage["format"] | u
 }
 
 export const decodeImage = (bytes: Uint8Array): DecodedImage => {
+  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new Error("Image exceeds the 25 MB size limit")
   const format = detectImageFormat(bytes)
   if (format === "PNG") {
+    if (bytes.length < 24) throw new Error("Invalid PNG header")
+    const header = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    assertPixelLimit(header.getUint32(16), header.getUint32(20))
     const image = PNG.sync.read(Buffer.from(bytes))
     return { data: new Uint8Array(image.data), width: image.width, height: image.height, format }
   }
   if (format === "JPEG") {
+    assertPixelLimit(...jpegDimensions(bytes))
     const image = jpeg.decode(bytes, { useTArray: true, formatAsRGBA: true })
     return { data: new Uint8Array(image.data), width: image.width, height: image.height, format }
   }
@@ -71,6 +77,7 @@ export const decodeImage = (bytes: Uint8Array): DecodedImage => {
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
     const page = UTIF.decode(buffer)[0]
     if (page === undefined) throw new Error("TIFF has no image pages")
+    assertPixelLimit(page.width, page.height)
     UTIF.decodeImage(buffer, page)
     return {
       data: new Uint8Array(UTIF.toRGBA8(page)),

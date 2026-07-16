@@ -17,6 +17,7 @@ import {
 } from "@opentui/core"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
+import { rmSync } from "node:fs"
 import { SpinnerRenderable } from "opentui-spinner"
 import type { ToolRequestUserInputResponse } from "../codex/generated/protocol.js"
 import {
@@ -272,9 +273,11 @@ export class HarnessView {
   private readonly imagePreview: BoxRenderable
   private readonly imagePreviewBitmap: TextRenderable
   private readonly attachments = new Map<string, CodexImageInput>()
+  private readonly ownedAttachmentPaths = new Set<string>()
   private nextImageNumber = 1
   private readonly writeTerminal: ((sequence: string) => void) | undefined
   private readonly kittyImageId = 0x676f78
+  private previewGeneration = 0
   private busy = false
   private sessionId: string | undefined
   private models: ReadonlyArray<CodexModel> = []
@@ -561,8 +564,8 @@ export class HarnessView {
       const prompt = value.trim()
       if (!prompt) return
       const images = this.activeAttachments(value)
+      for (const image of images) this.attachments.delete(image.label)
       this.input.value = ""
-      this.attachments.clear()
       this.hideImagePreview()
       this.updateComposerHeight()
 
@@ -619,6 +622,12 @@ export class HarnessView {
     }
 
     const inputChanged = (value: string) => {
+      for (const [token, attachment] of this.attachments) {
+        if (!value.includes(token)) {
+          this.attachments.delete(token)
+          this.cleanupAttachment(attachment)
+        }
+      }
       if (value !== this.dismissedSlashCommandValue) this.dismissedSlashCommandValue = undefined
       this.updateSlashCommandMenu(value)
       queueMicrotask(() => this.updateComposerHeight())
@@ -633,7 +642,7 @@ export class HarnessView {
         callbacks.onQuit()
         return
       }
-      if ((key.super || key.meta || key.ctrl) && key.name === "v" && this.input.focused) {
+      if (process.platform === "darwin" && (key.super || key.meta || key.ctrl) && key.name === "v" && this.input.focused) {
         key.preventDefault()
         void this.pasteImageFromSystemClipboard()
         return
@@ -706,13 +715,16 @@ export class HarnessView {
 
   private async addPastedImageBytes(bytes: Uint8Array, mime?: string): Promise<void> {
     const format = detectImageFormat(bytes)
-    const extension = format?.toLowerCase().replace("jpeg", "jpg")
-      ?? mime?.split("/")[1]?.replace("jpeg", "jpg")
-      ?? "img"
+    if (format === undefined) {
+      this.showCommandMessage("image", "Only PNG, JPEG, and TIFF images are supported.", true)
+      return
+    }
+    const extension = format.toLowerCase().replace("jpeg", "jpg")
     const path = join(tmpdir(), `goxt-${crypto.randomUUID()}.${extension}`)
     await Bun.write(path, bytes)
     const label = `[Image #${this.nextImageNumber++}]`
     this.attachments.set(label, { path, label })
+    this.ownedAttachmentPaths.add(path)
     this.input.insertText(label)
     await this.showImagePreview(label)
   }
@@ -728,12 +740,14 @@ export class HarnessView {
   }
 
   private async showImagePreview(token: string): Promise<void> {
+    const generation = ++this.previewGeneration
     const attachment = this.attachments.get(token)
     if (attachment === undefined || !this.input.value.includes(token)) return
     try {
       const width = Math.min(70, Math.max(20, this.renderer.width - 12))
       const height = Math.min(18, Math.max(8, this.renderer.height - 10))
       const source = decodeImage(new Uint8Array(await Bun.file(attachment.path).arrayBuffer()))
+      if (generation !== this.previewGeneration) return
       const image = resizeImage(source, width, height * 2)
       if (!this.input.value.includes(token)) return
       this.imagePreview.width = image.width + 2
@@ -762,8 +776,10 @@ export class HarnessView {
         // Wait until OpenTUI has laid out and painted the overlay, then place a
         // Kitty image in its content rectangle. Ghostty supports this protocol.
         await this.renderer.idle()
+        if (generation !== this.previewGeneration) return
         const previewPath = `${attachment.path}.preview.png`
         await Bun.write(previewPath, encodeImageAsPng(source))
+        if (generation !== this.previewGeneration) return
         const path = Buffer.from(previewPath).toString("base64")
         const column = this.imagePreview.screenX + 2
         const row = this.imagePreview.screenY + 2
@@ -778,11 +794,12 @@ export class HarnessView {
         this.imagePreviewBitmap.content = ""
       }
     } catch {
-      this.hideImagePreview()
+      if (generation === this.previewGeneration) this.hideImagePreview()
     }
   }
 
   private hideImagePreview(): void {
+    this.previewGeneration += 1
     if (this.imagePreview.visible && this.writeTerminal !== undefined) {
       this.writeTerminal(`\x1b_Ga=d,d=i,i=${this.kittyImageId},q=2\x1b\\`)
     }
@@ -1054,8 +1071,28 @@ export class HarnessView {
 
   destroy(): void {
     this.clearInteractions()
+    for (const attachment of this.attachments.values()) this.cleanupAttachment(attachment)
+    for (const path of this.ownedAttachmentPaths) this.cleanupPath(path)
     this.markdownSyntaxStyle.destroy()
     this.renderer.destroy()
+  }
+
+  releaseAttachments(images: ReadonlyArray<CodexImageInput>): void {
+    for (const image of images) this.cleanupAttachment(image)
+  }
+
+  private cleanupAttachment(attachment: CodexImageInput): void {
+    this.cleanupPath(attachment.path)
+    this.cleanupPath(`${attachment.path}.preview.png`)
+  }
+
+  private cleanupPath(path: string): void {
+    this.ownedAttachmentPaths.delete(path)
+    try {
+      rmSync(path, { force: true })
+    } catch {
+      // Cleanup is best-effort; files may already have been removed.
+    }
   }
 
   private turnSettings(): CodexTurnSettings {
