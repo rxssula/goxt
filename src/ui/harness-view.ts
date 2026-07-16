@@ -2,8 +2,6 @@ import {
   bold,
   BoxRenderable,
   fg,
-  InputRenderable,
-  InputRenderableEvents,
   MarkdownRenderable,
   ScrollBoxRenderable,
   SelectRenderable,
@@ -11,6 +9,7 @@ import {
   SyntaxStyle,
   t,
   TextRenderable,
+  TextareaRenderable,
   type CliRenderer,
   type KeyEvent,
   type SelectOption,
@@ -36,6 +35,34 @@ import {
   type SlashCommand,
   type SlashCommandSuggestion,
 } from "./slash-command.js"
+
+class PromptTextarea extends TextareaRenderable {
+  private _maxLength = 8_000
+  onValueChange: ((value: string) => void) | undefined
+
+  get value(): string {
+    return this.plainText
+  }
+
+  set value(value: string) {
+    this.setText(value.slice(0, this._maxLength))
+    this.onValueChange?.(this.plainText)
+  }
+
+  get maxLength(): number {
+    return this._maxLength
+  }
+
+  set maxLength(value: number) {
+    this._maxLength = value
+    if (this.plainText.length > value) this.setText(this.plainText.slice(0, value))
+  }
+
+  override insertText(text: string): void {
+    const available = this._maxLength - this.plainText.length
+    if (available > 0) super.insertText(text.slice(0, available))
+  }
+}
 
 interface Callbacks {
   readonly onSubmit: (prompt: string, settings: CodexTurnSettings) => void
@@ -191,7 +218,7 @@ const createMarkdownSyntaxStyle = (): SyntaxStyle =>
   })
 
 export class HarnessView {
-  readonly input: InputRenderable
+  readonly input: PromptTextarea
 
   private readonly renderer: CliRenderer
   private readonly welcome: BoxRenderable
@@ -211,6 +238,7 @@ export class HarnessView {
   private readonly onUserInput: Callbacks["onUserInput"]
   private readonly slashCommandMenu: BoxRenderable
   private readonly slashCommandRows: ReadonlyArray<TextRenderable>
+  private readonly composer: BoxRenderable
   private busy = false
   private sessionId: string | undefined
   private models: ReadonlyArray<CodexModel> = []
@@ -402,12 +430,13 @@ export class HarnessView {
       return row
     })
 
-    const composer = new BoxRenderable(renderer, {
+    this.composer = new BoxRenderable(renderer, {
       id: "composer",
       width: "100%",
       height: 3,
+      flexShrink: 0,
       flexDirection: "row",
-      alignItems: "center",
+      alignItems: "flex-start",
       borderStyle: "rounded",
       borderColor: theme.border,
       focusedBorderColor: theme.borderFocused,
@@ -415,17 +444,28 @@ export class HarnessView {
       paddingX: 1,
       backgroundColor: theme.background,
     })
-    composer.add(
+    this.composer.add(
       new TextRenderable(renderer, {
         content: t`${fg(theme.accent)("› ")}`,
         selectable: false,
         width: 2,
       }),
     )
-    this.input = new InputRenderable(renderer, {
+    this.input = new PromptTextarea(renderer, {
       id: "prompt",
       flexGrow: 1,
-      maxLength: 8_000,
+      flexShrink: 1,
+      flexBasis: 0,
+      minWidth: 0,
+      height: 1,
+      wrapMode: "char",
+      keyBindings: [
+        { name: "return", action: "submit" },
+        { name: "kpenter", action: "submit" },
+        { name: "linefeed", action: "submit" },
+        { name: "return", shift: true, action: "newline" },
+        { name: "kpenter", shift: true, action: "newline" },
+      ],
       placeholder: "Ask Codex, or type /help…",
       placeholderColor: theme.subtle,
       textColor: theme.text,
@@ -434,22 +474,33 @@ export class HarnessView {
       backgroundColor: theme.background,
       focusedBackgroundColor: theme.background,
     })
-    composer.add(this.input)
+    this.composer.add(this.input)
 
     this.shell.add(header)
     this.shell.add(main)
     this.shell.add(statusBar)
     this.shell.add(this.slashCommandMenu)
-    this.shell.add(composer)
+    this.shell.add(this.composer)
     renderer.root.add(this.shell)
     this.applyResponsiveLayout(renderer.width, renderer.height)
-    renderer.on("resize", (width, height) => this.applyResponsiveLayout(width, height))
+    renderer.on("resize", (width, height) => {
+      this.applyResponsiveLayout(width, height)
+      queueMicrotask(() => this.updateComposerHeight())
+    })
 
-    this.input.on(InputRenderableEvents.ENTER, (value: string) => {
+    this.input.onSubmit = () => {
       if (this.pickerOverlay !== undefined) return
+      const value = this.input.value
+      const suggestion = this.matchingSlashCommands[this.selectedSlashCommand]
+      const completion = suggestion === undefined ? undefined : `/${suggestion.name}`
+      if (completion !== undefined && completion !== value.toLowerCase()) {
+        this.input.value = completion
+        return
+      }
       const prompt = value.trim()
       if (!prompt) return
       this.input.value = ""
+      this.updateComposerHeight()
 
       const pendingInteraction = this.activeInteraction()
       if (pendingInteraction?._tag === "Approval") {
@@ -501,12 +552,15 @@ export class HarnessView {
         return
       }
       callbacks.onSubmit(prompt, this.turnSettings())
-    })
+    }
 
-    this.input.on(InputRenderableEvents.INPUT, (value: string) => {
+    const inputChanged = (value: string) => {
       if (value !== this.dismissedSlashCommandValue) this.dismissedSlashCommandValue = undefined
       this.updateSlashCommandMenu(value)
-    })
+      queueMicrotask(() => this.updateComposerHeight())
+    }
+    this.input.onValueChange = inputChanged
+    this.input.onContentChange = () => inputChanged(this.input.value)
 
     renderer.keyInput.on("keypress", (key) => {
       if (key.ctrl && key.name === "c") {
@@ -1381,6 +1435,20 @@ export class HarnessView {
     this.welcome.paddingY = height < 18 ? 1 : 2
     this.welcome.gap = height < 18 ? 0 : 1
     if (!this.busy && this.sessionId === undefined) this.welcome.visible = !tiny
+  }
+
+  private updateComposerHeight(): void {
+    const availableWidth = Math.max(1, this.input.width)
+    const wrappedRows = this.input.value
+      .split("\n")
+      .reduce((total, line) => total + Math.max(1, Math.ceil(line.length / availableWidth)), 0)
+    const rows = Math.max(
+      1,
+      Math.min(6, Math.max(this.input.virtualLineCount, this.input.lineCount, wrappedRows)),
+    )
+    this.input.height = rows
+    this.composer.height = rows + 2
+    this.slashCommandMenu.bottom = rows + 3
   }
 
   private activateNextInteraction(): void {

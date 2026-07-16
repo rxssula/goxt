@@ -70,6 +70,46 @@ describe("HarnessView", () => {
     expect(frame).toContain("Ask Codex, or type /help…")
   })
 
+  test("wraps multiline prompts and grows the composer", async () => {
+    testRenderer = await createTestRenderer({ width: 40, height: 20, kittyKeyboard: true })
+    const { renderer, renderOnce, captureCharFrame } = testRenderer
+    const keys = createMockKeys(renderer, { kittyKeyboard: true })
+    const submissions: string[] = []
+    const view = new HarnessView(renderer, "/workspace/goxt", {
+      ...callbacks,
+      onSubmit: (prompt) => submissions.push(prompt),
+    })
+
+    const prompt = `prefix-${"f".repeat(90)}`
+    view.input.value = prompt
+    await renderOnce()
+    await Promise.resolve()
+    await renderOnce()
+
+    expect(view.input.height).toBeGreaterThan(1)
+    const composerLines = captureCharFrame()
+      .split("\n")
+      .filter((line) => line.includes("fffff"))
+    const composerTopBorder = captureCharFrame()
+      .split("\n")
+      .filter((line) => line.includes("╮"))
+      .at(-1)!
+    const rightBorderColumn = composerTopBorder.indexOf("╮")
+    expect(composerLines.length).toBeGreaterThan(1)
+    expect(composerLines.every((line) => line[rightBorderColumn] === "│")).toBe(true)
+
+    keys.pressEnter({ shift: true })
+    await Promise.resolve()
+    expect(view.input.value).toContain("\n")
+    expect(submissions).toEqual([])
+
+    keys.pressEnter()
+    expect(submissions).toEqual([prompt])
+    expect(view.input.value).toBe("")
+    await renderOnce()
+    expect(view.input.height).toBe(1)
+  })
+
   test("switches between composer and j/k transcript navigation", async () => {
     testRenderer = await createTestRenderer({ width: 80, height: 16, kittyKeyboard: true })
     const { renderer } = testRenderer
